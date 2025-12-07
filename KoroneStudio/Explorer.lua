@@ -379,7 +379,7 @@ local function main()
 		local tSort = table.sort
 		local sortFunc = Explorer.NodeSorter
 		local isSearching = (expanded == Explorer.SearchExpanded)
-		local textServ = service.TextService
+		local textServ = game:GetService('TextService')
 
 		local function recur(root,depth)
 			if depth > maxDepth then maxDepth = depth end
