@@ -14089,3 +14089,48 @@ _G.IY_UTIL = IY_UTIL
 --   IY_UTIL.exportInstance(workspace, {name = "WorkspaceTree"})
 --   IY_UTIL.exportScriptToFile(workspace.Script)
 -- Hook this into Explorer selection for full integration.
+
+
+--// =====================================================
+--// COMMAND FILTER — KEEP ONLY DEX/EXPLORER & RSPY
+--// =====================================================
+
+pcall(function()
+    if Commands then
+        local allowed = {
+            dex = true,
+            explorer = true,
+            ["dex explorer"] = true,
+            rspy = true,
+            remotespy = true,
+        }
+
+        for i = #Commands, 1, -1 do
+            local cmd = Commands[i]
+            local keep = false
+            local names = cmd.Names or cmd.Aliases or cmd.Name
+
+            if typeof(names) == "table" then
+                for _, n in pairs(names) do
+                    if typeof(n) == "string" and allowed[string.lower(n)] then
+                        keep = true
+                        break
+                    end
+                end
+            elseif typeof(names) == "string" then
+                if allowed[string.lower(names)] then
+                    keep = true
+                end
+            end
+
+            if not keep then
+                table.remove(Commands, i)
+            end
+        end
+
+        print("[IY] Command filter active: only dex/explorer and rspy remain.")
+    else
+        warn("[IY] Command filter could not find Commands table.")
+    end
+end)
+
