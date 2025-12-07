@@ -1,10 +1,14 @@
 local shared      = _G.KS_Shared or error("KS_Shared missing")
 local CoreGui     = shared.CoreGui
 local UserInputService = shared.UserInputService
+local RunService  = shared.RunService
 local KS_Editor   = _G.KS_Editor or error("KS_Editor missing")
 local KS_UTIL     = _G.KS_UTIL or error("KS_UTIL missing")
 
 local KS_Explorer = { Gui = nil, Selected = nil }
+
+local MAX_NODES   = 3500   -- hard cap so huge games don't lag the client
+local BUILD_SLICE = 1/120  -- seconds of work per Heartbeat (smaller = smoother)
 
 local function makeDraggable(header, frame)
     local dragging, dragStart, startPos
@@ -97,20 +101,20 @@ local function createGui()
     bcc.Parent       = btnClose
 
     local content = Instance.new("Frame")
-    content.Position             = UDim2.new(0, 0, 0, 30)
-    content.Size                 = UDim2.new(1, 0, 1, -30)
+    content.Position              = UDim2.new(0, 0, 0, 30)
+    content.Size                  = UDim2.new(1, 0, 1, -30)
     content.BackgroundTransparency = 1
-    content.Parent               = main
+    content.Parent                = main
 
     local tree = Instance.new("ScrollingFrame")
-    tree.Name              = "Tree"
-    tree.Position          = UDim2.new(0, 4, 0, 4)
-    tree.Size              = UDim2.new(0.5, -6, 1, -8)
-    tree.BackgroundColor3  = Color3.fromRGB(20, 20, 22)
-    tree.BorderSizePixel   = 0
+    tree.Name               = "Tree"
+    tree.Position           = UDim2.new(0, 4, 0, 4)
+    tree.Size               = UDim2.new(0.5, -6, 1, -8)
+    tree.BackgroundColor3   = Color3.fromRGB(20, 20, 22)
+    tree.BorderSizePixel    = 0
     tree.ScrollBarThickness = 6
-    tree.CanvasSize        = UDim2.new(0, 0, 0, 0)
-    tree.Parent            = content
+    tree.CanvasSize         = UDim2.new(0, 0, 0, 0)
+    tree.Parent             = content
     local tc2 = Instance.new("UICorner")
     tc2.CornerRadius = UDim.new(0, 6)
     tc2.Parent       = tree
@@ -171,20 +175,23 @@ local function createGui()
     bex.Parent       = btnExport
 
     local propList = Instance.new("ScrollingFrame")
-    propList.Name              = "Props"
-    propList.Position          = UDim2.new(0, 6, 0, 64)
-    propList.Size              = UDim2.new(1, -12, 1, -70)
+    propList.Name               = "Props"
+    propList.Position           = UDim2.new(0, 6, 0, 64)
+    propList.Size               = UDim2.new(1, -12, 1, -70)
     propList.BackgroundTransparency = 1
-    propList.BorderSizePixel   = 0
+    propList.BorderSizePixel    = 0
     propList.ScrollBarThickness = 6
-    propList.CanvasSize        = UDim2.new(0, 0, 0, 0)
-    propList.Parent            = right
+    propList.CanvasSize         = UDim2.new(0, 0, 0, 0)
+    propList.Parent             = right
 
     local propLayout = Instance.new("UIListLayout")
     propLayout.Padding       = UDim.new(0, 2)
     propLayout.FillDirection = Enum.FillDirection.Vertical
     propLayout.SortOrder     = Enum.SortOrder.LayoutOrder
     propLayout.Parent        = propList
+
+    -- selection highlight
+    local currentSelectedButton = nil
 
     local function addPropRow(name, val)
         local row = Instance.new("TextLabel")
@@ -194,12 +201,38 @@ local function createGui()
         row.TextSize         = 13
         row.TextXAlignment   = Enum.TextXAlignment.Left
         row.TextColor3       = Color3.new(1, 1, 1)
-        row.Text             = name.." = "..tostring(val)
+        row.Text             = name .. " = " .. tostring(val)
         row.Parent           = propList
     end
 
-    local function buildTree(inst, depth)
-        depth = depth or 0
+    local function showProperties(inst)
+        -- clear previous rows but keep layout
+        for _, c in ipairs(propList:GetChildren()) do
+            if c:IsA("TextLabel") or c:IsA("Frame") then
+                c:Destroy()
+            end
+        end
+
+        if not inst then
+            propList.CanvasSize = UDim2.new(0, 0, 0, 0)
+            return
+        end
+
+        for _, p in ipairs({
+            "Name","ClassName","Parent","Archivable",
+            "Transparency","Anchored","CanCollide","Text","Value"
+        }) do
+            local ok, v = pcall(function() return inst[p] end)
+            if ok then
+                addPropRow(p, v)
+            end
+        end
+
+        propList.CanvasSize = UDim2.new(0, 0, 0, propLayout.AbsoluteContentSize.Y + 8)
+    end
+
+    -- create a single row button for an instance
+    local function createNodeButton(inst, depth)
         local btn = Instance.new("TextButton")
         btn.Size             = UDim2.new(1, -4, 0, 22)
         btn.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
@@ -209,51 +242,124 @@ local function createGui()
         btn.TextSize         = 14
         btn.TextXAlignment   = Enum.TextXAlignment.Left
         btn.TextColor3       = Color3.new(1, 1, 1)
-        btn.Text             = string.rep("   ", depth)..iconFor(inst).." "..inst.Name.." ["..inst.ClassName.."]"
+        btn.Text             = string.rep("   ", depth) .. iconFor(inst) .. " " .. inst.Name .. " [" .. inst.ClassName .. "]"
         btn.Parent           = tree
         local bc3 = Instance.new("UICorner")
         bc3.CornerRadius = UDim.new(0, 4)
         bc3.Parent       = btn
 
         local lastClick = 0
-        btn.MouseButton1Click:Connect(function()
-            KS_Explorer.Selected = inst
-            nameLabel.Text = "Instance: "..inst.Name.." ("..inst.ClassName..")"
-            for _, c in ipairs(propList:GetChildren()) do
-                if c:IsA("TextLabel") then c:Destroy() end
-            end
-            for _, p in ipairs({"Name","ClassName","Parent","Archivable","Transparency","Anchored","CanCollide","Text","Value"}) do
-                local ok, v = pcall(function() return inst[p] end)
-                if ok then addPropRow(p, v) end
-            end
-            propList.CanvasSize = UDim2.new(0, 0, 0, propLayout.AbsoluteContentSize.Y + 8)
 
+        btn.MouseButton1Click:Connect(function()
+            -- selection state
+            if currentSelectedButton and currentSelectedButton ~= btn then
+                currentSelectedButton.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+            end
+            currentSelectedButton = btn
+            btn.BackgroundColor3  = Color3.fromRGB(40, 40, 52)
+
+            KS_Explorer.Selected = inst
+            nameLabel.Text       = "Instance: " .. inst.Name .. " (" .. inst.ClassName .. ")"
+            showProperties(inst)
+
+            -- double-click opens editor
             local now = tick()
             if now - lastClick <= 0.3 then
-                KS_Editor.Open(inst)
+                pcall(KS_Editor.Open, inst)
             end
             lastClick = now
         end)
 
-        for _, child in ipairs(inst:GetChildren()) do
-            buildTree(child, depth + 1)
+        return btn
+    end
+
+    -- incremental tree builder to avoid freezing on big games
+    local function rebuildTree()
+        -- clear old rows but keep layout
+        for _, c in ipairs(tree:GetChildren()) do
+            if c:IsA("TextButton") then
+                c:Destroy()
+            end
         end
+        tree.CanvasSize = UDim2.new(0, 0, 0, 0)
+        currentSelectedButton = nil
+        KS_Explorer.Selected  = nil
+        nameLabel.Text        = "Instance: (none)"
+        showProperties(nil)
+
+        local queue = {}
+        local roots = {
+            game:GetService("Workspace"),
+            game:GetService("Players"),
+            game:GetService("ReplicatedStorage"),
+            game:GetService("StarterGui"),
+        }
+
+        for _, root in ipairs(roots) do
+            if root then
+                table.insert(queue, { inst = root, depth = 0 })
+            end
+        end
+
+        local processed = 0
+        local truncated = false
+        local hbConn
+
+        local function step()
+            local start = tick()
+            while #queue > 0 and tick() - start < BUILD_SLICE do
+                local node = table.remove(queue, 1)
+                local inst = node.inst
+                local depth = node.depth
+
+                processed += 1
+                if processed > MAX_NODES then
+                    truncated = true
+                    queue = {}
+                    break
+                end
+
+                createNodeButton(inst, depth)
+
+                -- enqueue children
+                local ok, children = pcall(inst.GetChildren, inst)
+                if ok then
+                    for _, child in ipairs(children) do
+                        table.insert(queue, { inst = child, depth = depth + 1 })
+                    end
+                end
+            end
+
+            tree.CanvasSize = UDim2.new(0, 0, 0, treeLayout.AbsoluteContentSize.Y + 8)
+
+            if #queue == 0 then
+                if hbConn then hbConn:Disconnect() end
+
+                if truncated then
+                    -- add a little warning row at the end (same look)
+                    local warnRow = Instance.new("TextLabel")
+                    warnRow.BackgroundTransparency = 1
+                    warnRow.Size             = UDim2.new(1, -4, 0, 18)
+                    warnRow.Font             = Enum.Font.SourceSansItalic
+                    warnRow.TextSize         = 13
+                    warnRow.TextXAlignment   = Enum.TextXAlignment.Left
+                    warnRow.TextColor3       = Color3.fromRGB(255, 200, 150)
+                    warnRow.Text             = "… tree truncated after " .. tostring(MAX_NODES) .. " instances"
+                    warnRow.Parent           = tree
+                    tree.CanvasSize          = UDim2.new(0, 0, 0, treeLayout.AbsoluteContentSize.Y + 8)
+                end
+            end
+        end
+
+        hbConn = RunService.Heartbeat:Connect(step)
     end
 
-    for _, root in ipairs({
-        game:GetService("Workspace"),
-        game:GetService("Players"),
-        game:GetService("ReplicatedStorage"),
-        game:GetService("StarterGui"),
-    }) do
-        if root then buildTree(root, 0) end
-    end
-
-    tree.CanvasSize = UDim2.new(0, 0, 0, treeLayout.AbsoluteContentSize.Y + 8)
+    -- initial build
+    rebuildTree()
 
     btnEdit.MouseButton1Click:Connect(function()
         if KS_Explorer.Selected then
-            KS_Editor.Open(KS_Explorer.Selected)
+            pcall(KS_Editor.Open, KS_Explorer.Selected)
         end
     end)
 
@@ -261,9 +367,9 @@ local function createGui()
         local inst = KS_Explorer.Selected
         if not inst then return end
         if inst:IsA("LuaSourceContainer") then
-            KS_UTIL.exportScript(inst)
+            pcall(KS_UTIL.exportScript, inst)
         else
-            KS_UTIL.exportInstance(inst, { name = inst.Name })
+            pcall(KS_UTIL.exportInstance, inst, { name = inst.Name })
         end
     end)
 
@@ -273,11 +379,17 @@ local function createGui()
 
     makeDraggable(top, main)
     KS_Explorer.Gui = gui
+    KS_Explorer._RebuildTree = rebuildTree
 end
 
 function KS_Explorer.Toggle()
     createGui()
     KS_Explorer.Gui.Enabled = not KS_Explorer.Gui.Enabled
+
+    -- optional: whenever you re-open, refresh the tree snapshot
+    if KS_Explorer.Gui.Enabled and KS_Explorer._RebuildTree then
+        KS_Explorer._RebuildTree()
+    end
 end
 
 _G.KS_Explorer = KS_Explorer
