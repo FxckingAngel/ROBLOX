@@ -1525,43 +1525,7 @@ local function main()
 				return function() return service.Players:GetPlayers() end
 			end,
 			["loadedmodules"] = function()
-				-- Safely fetch loaded ModuleScripts across different executors.
-				-- Falls back to an empty table if getloadedmodules is missing / blocked.
-				return function()
-					local ok, result = pcall(function()
-						local getter
-						-- 1) Direct global (some exploits expose it here)
-						if typeof(getloadedmodules) == "function" then
-							getter = getloadedmodules
-						end
-						-- 2) Current environment table
-						if not getter and typeof(getfenv) == "function" then
-							local envTable = getfenv()
-							if type(envTable) == "table" and typeof(envTable.getloadedmodules) == "function" then
-								getter = envTable.getloadedmodules
-							end
-						end
-						-- 3) getrenv() (Synapse X / Script-Ware style)
-						if not getter and typeof(getrenv) == "function" then
-							local renv = getrenv()
-							if type(renv) == "table" and typeof(renv.getloadedmodules) == "function" then
-								getter = renv.getloadedmodules
-							end
-						end
-
-						if getter then
-							local ok2, mods = pcall(getter)
-							if ok2 and type(mods) == "table" then
-								return mods
-							end
-						end
-						return {}
-					end)
-					if ok and type(result) == "table" then
-						return result
-					end
-					return {}
-				end
+				return env.getloadedmodules
 			end,
 		},
 		Default = function(argString,caseSensitive)
@@ -2252,19 +2216,34 @@ return search]==]
 			end
 		end
 	end
--- ✅ HARD BRIDGE FOR HUB BUTTON (DO NOT REMOVE)
-_G.KS_Explorer = Explorer
-
-function _G.KS_Explorer.Toggle()
-	if Explorer.Gui then
-		Explorer.Gui.Enabled = not Explorer.Gui.Enabled
-	else
-		if Explorer.Init then
-			Explorer.Init()
-		end
-	end
-end
 
 	return Explorer
 end
 
+-- KoroneStudio / Dex bridge export
+local exported = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = main}
+
+-- Optional: hub global for Korone Studio side menu
+_G.KS_Explorer = _G.KS_Explorer or exported
+
+function exported.Toggle()
+	-- Called by Korone Studio hub button
+	if Explorer and Explorer.Window then
+		local win = Explorer.Window
+		local isClosed = (win.Closed == nil and not win.Visible) or win.Closed
+		if isClosed then
+			win:Show({Align = "right", Pos = 1, Size = 0.5})
+		else
+			win:Close()
+		end
+	else
+		warn("[KoroneStudio] Explorer not initialised yet")
+	end
+end
+
+-- Preserve original Dex export style
+if gethsfuncs then
+	_G.moduleData = exported
+else
+	return exported
+end
