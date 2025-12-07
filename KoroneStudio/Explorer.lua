@@ -38,7 +38,27 @@ local function main()
 	local entryTemplate,treeFrame,toolBar,descendantAddedCon,descendantRemovingCon,itemChangedCon
 	local ffa = game.FindFirstAncestorWhichIsA
 	local getDescendants = game.GetDescendants
-	local getTextSize = service.TextService.GetTextSize
+	-- Safe TextService access (executor-friendly)
+	local getTextSize do
+		local ok, textService = pcall(game.GetService, game, "TextService")
+		if ok and textService then
+			-- Keep the same call style as the original code: getTextSize(textService, text, size, font, bounds)
+			function getTextSize(_, text, textSize, font, bounds)
+				local ok2, result = pcall(textService.GetTextSize, textService, text, textSize, font, bounds)
+				if ok2 then
+					return result
+				else
+					-- Fallback size if TextService fails for any reason
+					return Vector2.new(0, 20)
+				end
+			end
+		else
+			-- Total fallback if TextService is completely unavailable
+			function getTextSize()
+				return Vector2.new(0, 20)
+			end
+		end
+	end
 	local updateDebounce,refreshDebounce = false,false
 	local nilNode = {Obj = Instance.new("Folder")}
 	local idCounter = 0
