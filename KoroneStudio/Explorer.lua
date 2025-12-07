@@ -1525,24 +1525,44 @@ local function main()
 				return function() return service.Players:GetPlayers() end
 			end,
 			["loadedmodules"] = function()
-			-- Safer wrapper: some executors don't expose env.getloadedmodules or may error
-			local fn = env and env.getloadedmodules
-
-			if typeof(fn) == "function" then
+				-- Safely fetch loaded ModuleScripts across different executors.
+				-- Falls back to an empty table if getloadedmodules is missing / blocked.
 				return function()
-					local ok, res = pcall(fn)
-					if ok and type(res) == "table" then
-						return res
+					local ok, result = pcall(function()
+						local getter
+						-- 1) Direct global (some exploits expose it here)
+						if typeof(getloadedmodules) == "function" then
+							getter = getloadedmodules
+						end
+						-- 2) Current environment table
+						if not getter and typeof(getfenv) == "function" then
+							local envTable = getfenv()
+							if type(envTable) == "table" and typeof(envTable.getloadedmodules) == "function" then
+								getter = envTable.getloadedmodules
+							end
+						end
+						-- 3) getrenv() (Synapse X / Script-Ware style)
+						if not getter and typeof(getrenv) == "function" then
+							local renv = getrenv()
+							if type(renv) == "table" and typeof(renv.getloadedmodules) == "function" then
+								getter = renv.getloadedmodules
+							end
+						end
+
+						if getter then
+							local ok2, mods = pcall(getter)
+							if ok2 and type(mods) == "table" then
+								return mods
+							end
+						end
+						return {}
+					end)
+					if ok and type(result) == "table" then
+						return result
 					end
 					return {}
 				end
-			else
-				-- Feature unsupported on this executor – keep search working
-				return function()
-					return {}
-				end
-			end
-		end,
+			end,
 		},
 		Default = function(argString,caseSensitive)
 			local cleanString = argString:gsub("\"","\\\""):gsub("\n","\\n")
