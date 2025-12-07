@@ -1,9 +1,10 @@
 --//=====================================================
---// Korone Studio Tools - Standalone
---//  • Emoji UI Hub
---//  • Studio-like Explorer
---//  • Working Remote Spy
---//  • Script / Property Editor + File Export
+--// 🌙 Korone Studio Tools 2026
+--//  • Next-Gen Explorer (Dex-style)
+--//  • Live Script / Property Editor
+--//  • Remote Spy 2.0 (filters + pause + clear)
+--//  • Script Library (download scripts from verified URLs)
+--//  • FS/HTTP/Hook-aware, tries to support most executors
 --//=====================================================
 
 -------------------------------
@@ -17,115 +18,149 @@ local HttpService = game:GetService("HttpService")
 
 local LocalPlayer = Players.LocalPlayer or Players.PlayerAdded:Wait()
 
+local function log(...)
+	print("[KoroneStudio]", ...)
+end
+
+local function warnLog(...)
+	warn("[KoroneStudio]", ...)
+end
+
 local function safe(fn, ...)
 	local ok, res = pcall(fn, ...)
-	if not ok then warn("[KoroneStudio]", res) end
+	if not ok then warnLog(res) end
 	return ok, res
 end
 
 -------------------------------
--- Korone Studio Util (FS + scripts + decomposer)
+-- Capability detection
 -------------------------------
-local KS_UTIL = {}
+local CAP = {}
 
--- filesystem helpers
-function KS_UTIL.canFS()
-	return typeof(writefile) == "function" and typeof(readfile) == "function"
-end
+-- Filesystem
+CAP.writefile = (typeof(writefile) == "function") and writefile or nil
+CAP.readfile  = (typeof(readfile)  == "function") and readfile or nil
+CAP.isfolder  = (typeof(isfolder)  == "function") and isfolder or nil
+CAP.makefolder= (typeof(makefolder)== "function") and makefolder or nil
 
-function KS_UTIL.ensureFolders(path)
-	if not KS_UTIL.canFS() then return end
-	if typeof(makefolder) ~= "function" or typeof(isfolder) ~= "function" then return end
+CAP.canFS = CAP.writefile and CAP.readfile and CAP.isfolder and CAP.makefolder
 
+-- HTTP (executor request)
+local httpRequest = (syn and syn.request)
+	or (http and http.request)
+	or (request)
+	or (fluxus and fluxus.request)
+	or (krnl and krnl.request)
+	or (http_request)
+
+CAP.httpRequest = httpRequest or nil
+
+-- namecall hook
+local hookMM = rawget(getfenv(), "hookmetamethod") or (hookmetamethod)
+local getNCM = rawget(getfenv(), "getnamecallmethod") or getnamecallmethod
+
+CAP.hookmetamethod = hookMM or nil
+CAP.getnamecallmethod = getNCM or nil
+
+-------------------------------
+-- Util: FS + HTTP + small helpers
+-------------------------------
+local KUTIL = {}
+
+function KUTIL.ensureFolders(path)
+	if not CAP.canFS then return end
 	local cur = ""
 	for seg in string.gmatch(path, "[^/]+") do
 		if cur == "" then cur = seg else cur = cur .. "/" .. seg end
-		if not isfolder(cur) then
-			makefolder(cur)
+		if not CAP.isfolder(cur) then
+			safe(CAP.makefolder, cur)
 		end
 	end
 end
 
-function KS_UTIL.writeFile(path, contents)
-	if not KS_UTIL.canFS() then
-		error("Filesystem not supported in this exploit.")
+function KUTIL.writeFile(path, contents)
+	if not CAP.canFS then
+		warnLog("Filesystem not supported in this executor.")
+		return false
 	end
-	local ok, err = pcall(writefile, path, contents)
-	if not ok then error("Failed to write file '" .. path .. "': " .. tostring(err)) end
+	local ok, err = pcall(CAP.writefile, path, contents)
+	if not ok then
+		warnLog("Failed to write file '"..path.."': "..tostring(err))
+		return false
+	end
+	return true
 end
 
--- decomposer
-local function decomposeInstance(inst, depth, maxDepth)
-	depth = depth or 0
-	maxDepth = maxDepth or 5
-
-	if depth > maxDepth then
-		return { __truncated = true, Name = inst.Name, ClassName = inst.ClassName }
-	end
-
-	local info = {
-		Name = inst.Name,
-		ClassName = inst.ClassName,
-		Properties = {},
-		Children = {},
-	}
-
-	local function prop(p)
-		local ok, v = pcall(function() return inst[p] end)
-		if ok then info.Properties[p] = v end
-	end
-
-	for _, p in ipairs({
-		"Name","ClassName","Parent","Archivable",
-		"Transparency","Anchored","CanCollide",
-		"Size","Position","Text","Value","BrickColor","Color"
-	}) do
-		prop(p)
-	end
-
-	for _, child in ipairs(inst:GetChildren()) do
-		table.insert(info.Children, decomposeInstance(child, depth+1, maxDepth))
-	end
-
-	return info
+function KUTIL.readFile(path)
+	if not CAP.canFS then return nil end
+	local ok, res = pcall(CAP.readfile, path)
+	if ok then return res end
+	return nil
 end
 
-function KS_UTIL.decompose(root, maxDepth)
-	maxDepth = maxDepth or 5
-	if typeof(root) == "string" then
-		local current = game
-		for token in string.gmatch(root, "[^%.]+") do
-			local child = current:FindFirstChild(token)
-			if not child then error("Cannot resolve '"..token.."' from "..current:GetFullName()) end
-			current = child
+function KUTIL.fetch(url)
+	-- 1) Executor HTTP
+	if CAP.httpRequest then
+		local ok, res = pcall(CAP.httpRequest, {
+			Url = url,
+			Method = "GET"
+		})
+		if ok and res and res.Body then
+			return res.Body
 		end
-		root = current
 	end
-	if typeof(root) ~= "Instance" then
-		error("decompose expects Instance or path string")
-	end
-	local tree = decomposeInstance(root, 0, maxDepth)
-	print("[KoroneStudio] Decomposed:", root:GetFullName())
-	print(HttpService:JSONEncode(tree))
-	return tree
+	-- 2) Fallback to HttpService (for environments that allow it)
+	local ok2, body = pcall(function()
+		return HttpService:GetAsync(url)
+	end)
+	if ok2 then return body end
+	return nil
 end
 
-function KS_UTIL.exportInstance(root, opts)
-	opts = opts or {}
-	local folder = opts.folder or ("KoroneExports/"..tostring(game.PlaceId))
-	local name   = opts.name   or root.Name
-	local maxDepth = opts.maxDepth or 6
-
-	KS_UTIL.ensureFolders(folder)
-	local tree = KS_UTIL.decompose(root, maxDepth)
-	local json = HttpService:JSONEncode(tree)
-	local path = folder.."/"..name..".json"
-	KS_UTIL.writeFile(path, json)
-	print("[KoroneStudio] Exported instance to:", path)
-	return path
+function KUTIL.prettyArgs(args)
+	local ok, encoded = pcall(function()
+		return HttpService:JSONEncode(args)
+	end)
+	if not ok then
+		return "<failed to encode args>"
+	end
+	if #encoded > 400 then
+		encoded = encoded:sub(1,397).."..."
+	end
+	return encoded
 end
 
--- scripts
+function KUTIL.makeDraggable(header, frame)
+	local dragging, dragStart, startPos
+	header.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = true
+			dragStart = input.Position
+			startPos = frame.Position
+		end
+	end)
+	header.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			dragging = false
+		end
+	end)
+	UserInputService.InputChanged:Connect(function(input)
+		if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement
+			or input.UserInputType == Enum.UserInputType.Touch) then
+			local delta = input.Position - dragStart
+			frame.Position = UDim2.new(
+				startPos.X.Scale, startPos.X.Offset + delta.X,
+				startPos.Y.Scale, startPos.Y.Offset + delta.Y
+			)
+		end
+	end)
+end
+
+-------------------------------
+-- Script decompile helpers
+-------------------------------
 local function tryDecompile(inst)
 	if typeof(decompile) == "function" then
 		local ok, src = pcall(decompile, inst)
@@ -138,565 +173,521 @@ local function tryDecompile(inst)
 	return "-- failed to get source for "..inst:GetFullName()
 end
 
-function KS_UTIL.getScriptSource(inst)
-	if not inst or not inst:IsA("LuaSourceContainer") then
-		error("getScriptSource expects Script/LocalScript/ModuleScript")
-	end
-	return tryDecompile(inst)
+local function applySource(inst, src)
+	if not inst:IsA("LuaSourceContainer") then return false,"Not a script" end
+	local ok, err = pcall(function()
+		inst.Source = src
+	end)
+	return ok, err
 end
-
-function KS_UTIL.applyScriptSource(inst, src)
-	if not inst or not inst:IsA("LuaSourceContainer") then
-		error("applyScriptSource expects Script/LocalScript/ModuleScript")
-	end
-	local ok, err = pcall(function() inst.Source = src end)
-	if not ok then error("Failed to apply script source: "..tostring(err)) end
-end
-
-function KS_UTIL.exportScript(inst, folder)
-	folder = folder or ("KoroneExports/"..tostring(game.PlaceId).."/Scripts")
-	KS_UTIL.ensureFolders(folder)
-	local src = KS_UTIL.getScriptSource(inst)
-	local safeName = inst.Name:gsub("[^%w_]+","_")
-	local path = folder.."/"..safeName.."_"..inst.ClassName..".lua"
-	KS_UTIL.writeFile(path, src)
-	print("[KoroneStudio] Exported script to:", path)
-	return path
-end
-
-_G.KS_UTIL = KS_UTIL
 
 -------------------------------
--- Korone Editor UI
+-- GLOBAL STATE / singletons
 -------------------------------
-local KS_Editor = { Gui = nil, CurrentInstance = nil }
+local KS_Explorer  = { Gui=nil, Selected=nil }
+local KS_Editor    = { Gui=nil, Current=nil }
+local KS_RSpy      = { Gui=nil, Enabled=true, AddLog=nil, FilterText="", OnlyRemotes=true, Paused=false }
+local KS_Library   = { Gui=nil }
+local KS_Hub       = { Gui=nil }
 
-local function makeDraggable(header, frame)
-	local dragging, dragStart, startPos
-	header.InputBegan:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging = true
-			dragStart = input.Position
-			startPos = frame.Position
-		end
-	end)
-	header.InputEnded:Connect(function(input)
-		if input.UserInputType == Enum.UserInputType.MouseButton1 then
-			dragging = false
-		end
-	end)
-	UserInputService.InputChanged:Connect(function(input)
-		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
-			local delta = input.Position - dragStart
-			frame.Position = UDim2.new(
-				startPos.X.Scale, startPos.X.Offset + delta.X,
-				startPos.Y.Scale, startPos.Y.Offset + delta.Y
-			)
-		end
-	end)
-end
-
-local function createEditorGui()
-	if KS_Editor.Gui then return end
-
+-------------------------------
+-- UI FACTORY (2026 look)
+-------------------------------
+local function newScreenGui(name)
 	local gui = Instance.new("ScreenGui")
-	gui.Name = "KoroneEditor"
+	gui.Name = name
 	gui.ResetOnSpawn = false
 	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	gui.IgnoreGuiInset = true
 	gui.Parent = CoreGui
+	return gui
+end
 
-	local main = Instance.new("Frame")
-	main.AnchorPoint = Vector2.new(0.5,0.5)
-	main.Position = UDim2.new(0.5,0,0.5,0)
-	main.Size = UDim2.new(0,740,0,430)
-	main.BackgroundColor3 = Color3.fromRGB(24,24,26)
-	main.BorderSizePixel = 0
-	main.Parent = gui
-	local mc = Instance.new("UICorner"); mc.CornerRadius = UDim.new(0,10); mc.Parent = main
+local function roundedFrame(parent, size, pos, color, radius)
+	local f = Instance.new("Frame")
+	f.Size = size
+	f.Position = pos or UDim2.new()
+	f.BackgroundColor3 = color or Color3.fromRGB(20,20,24)
+	f.BorderSizePixel = 0
+	f.Parent = parent
+	local c = Instance.new("UICorner")
+	c.CornerRadius = radius or UDim.new(0,10)
+	c.Parent = f
+	return f
+end
 
-	local top = Instance.new("Frame")
-	top.Size = UDim2.new(1,0,0,32)
-	top.BackgroundColor3 = Color3.fromRGB(30,30,34)
-	top.BorderSizePixel = 0
-	top.Parent = main
-	local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(0,10); tc.Parent = top
+local function label(parent, text, size, pos, fontSize, bold)
+	local l = Instance.new("TextLabel")
+	l.BackgroundTransparency = 1
+	l.Size = size
+	l.Position = pos or UDim2.new()
+	l.Text = text
+	l.Font = bold and Enum.Font.GothamBold or Enum.Font.Gotham
+	l.TextSize = fontSize or 16
+	l.TextXAlignment = Enum.TextXAlignment.Left
+	l.TextYAlignment = Enum.TextYAlignment.Center
+	l.TextColor3 = Color3.new(1,1,1)
+	l.Parent = parent
+	return l
+end
 
-	local title = Instance.new("TextLabel")
-	title.BackgroundTransparency = 1
-	title.Size = UDim2.new(1,-170,1,0)
-	title.Position = UDim2.new(0,12,0,0)
-	title.Font = Enum.Font.SourceSansSemibold
-	title.TextSize = 18
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextColor3 = Color3.new(1,1,1)
-	title.Text = "✏️ Korone Script Editor"
-	title.Parent = top
+local function button(parent, size, pos, text, subText, color)
+	local btn = Instance.new("TextButton")
+	btn.Size = size
+	btn.Position = pos or UDim2.new()
+	btn.BackgroundColor3 = color or Color3.fromRGB(60,70,120)
+	btn.BorderSizePixel = 0
+	btn.Text = ""
+	btn.AutoButtonColor = true
+	btn.Parent = parent
+	local c = Instance.new("UICorner")
+	c.CornerRadius = UDim.new(0,8)
+	c.Parent = btn
 
-	local btnClose = Instance.new("TextButton")
-	btnClose.Size = UDim2.new(0,26,0,22)
-	btnClose.Position = UDim2.new(1,-32,0.5,-11)
-	btnClose.BackgroundColor3 = Color3.fromRGB(70,35,35)
-	btnClose.BorderSizePixel = 0
-	btnClose.Font = Enum.Font.SourceSansBold
-	btnClose.Text = "X"
-	btnClose.TextSize = 16
-	btnClose.TextColor3 = Color3.new(1,1,1)
-	btnClose.Parent = top
-	local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0,6); bc.Parent = btnClose
+	local title = label(btn, text, UDim2.new(1,-10,0,22), UDim2.new(0,10,0,4), 16, true)
+	local sub   = label(btn, subText or "", UDim2.new(1,-10,0,16), UDim2.new(0,10,0,22), 13, false)
+	sub.TextColor3 = Color3.fromRGB(220,220,230)
+	sub.TextTransparency = 0.15
 
-	local btnSave = Instance.new("TextButton")
-	btnSave.Size = UDim2.new(0,80,0,22)
-	btnSave.Position = UDim2.new(1,-200,0.5,-11)
-	btnSave.BackgroundColor3 = Color3.fromRGB(45,90,45)
-	btnSave.BorderSizePixel = 0
-	btnSave.Font = Enum.Font.SourceSansSemibold
-	btnSave.Text = "💾 Save"
-	btnSave.TextSize = 14
-	btnSave.TextColor3 = Color3.new(1,1,1)
-	btnSave.Parent = top
-	local bs = Instance.new("UICorner"); bs.CornerRadius = UDim.new(0,6); bs.Parent = btnSave
+	return btn, title, sub
+end
 
-	local btnExport = Instance.new("TextButton")
-	btnExport.Size = UDim2.new(0,80,0,22)
-	btnExport.Position = UDim2.new(1,-116,0.5,-11)
-	btnExport.BackgroundColor3 = Color3.fromRGB(45,60,100)
-	btnExport.BorderSizePixel = 0
-	btnExport.Font = Enum.Font.SourceSansSemibold
-	btnExport.Text = "📤 Export"
-	btnExport.TextSize = 14
-	btnExport.TextColor3 = Color3.new(1,1,1)
-	btnExport.Parent = top
-	local be = Instance.new("UICorner"); be.CornerRadius = UDim.new(0,6); be.Parent = btnExport
+local function textBox(parent, size, pos, placeholder, codeFont)
+	local tb = Instance.new("TextBox")
+	tb.Size = size
+	tb.Position = pos or UDim2.new()
+	tb.BackgroundColor3 = Color3.fromRGB(24,24,30)
+	tb.BorderSizePixel = 0
+	tb.ClearTextOnFocus = false
+	tb.PlaceholderText = placeholder or ""
+	tb.Font = codeFont and Enum.Font.Code or Enum.Font.Gotham
+	tb.TextSize = codeFont and 15 or 14
+	tb.TextColor3 = Color3.new(1,1,1)
+	tb.TextXAlignment = Enum.TextXAlignment.Left
+	tb.TextYAlignment = Enum.TextYAlignment.Center
+	tb.Parent = parent
+	local c = Instance.new("UICorner"); c.CornerRadius = UDim.new(0,6); c.Parent = tb
+	return tb
+end
 
-	local content = Instance.new("Frame")
-	content.Position = UDim2.new(0,0,0,32)
-	content.Size = UDim2.new(1,0,1,-32)
-	content.BackgroundTransparency = 1
-	content.Parent = main
+-------------------------------
+-- EDITOR UI
+-------------------------------
+local function createEditor()
+	if KS_Editor.Gui then return end
 
-	local tabs = Instance.new("Frame")
-	tabs.Size = UDim2.new(0,120,1,0)
-	tabs.BackgroundColor3 = Color3.fromRGB(30,30,34)
-	tabs.BorderSizePixel = 0
-	tabs.Parent = content
-	local tbc = Instance.new("UICorner"); tbc.CornerRadius = UDim.new(0,10); tbc.Parent = tabs
+	local gui = newScreenGui("KoroneEditorV2")
+	local main = roundedFrame(gui, UDim2.new(0,820,0,480), UDim2.new(0.5,-410,0.5,-240), Color3.fromRGB(18,18,22))
 
-	local scriptTab = Instance.new("TextButton")
-	scriptTab.Size = UDim2.new(1,0,0,30)
-	scriptTab.BackgroundColor3 = Color3.fromRGB(40,40,48)
-	scriptTab.BorderSizePixel = 0
-	scriptTab.Font = Enum.Font.SourceSansSemibold
-	scriptTab.Text = "📜 Script"
-	scriptTab.TextSize = 16
-	scriptTab.TextColor3 = Color3.new(1,1,1)
-	scriptTab.Parent = tabs
+	local top = roundedFrame(main, UDim2.new(1,0,0,34), UDim2.new(0,0,0,0), Color3.fromRGB(26,26,32), UDim.new(0,10))
+	local title = label(top, "✏️ Korone Live Editor", UDim2.new(1,-130,1,0), UDim2.new(0,12,0,0), 18, true)
 
-	local propTab = Instance.new("TextButton")
-	propTab.Size = UDim2.new(1,0,0,30)
-	propTab.Position = UDim2.new(0,0,0,32)
-	propTab.BackgroundColor3 = Color3.fromRGB(26,26,30)
-	propTab.BorderSizePixel = 0
-	propTab.Font = Enum.Font.SourceSansSemibold
-	propTab.Text = "⚙️ Properties"
-	propTab.TextSize = 16
-	propTab.TextColor3 = Color3.fromRGB(0.8,0.8,0.8)
-	propTab.Parent = tabs
+	local saveBtn = button(top, UDim2.new(0,90,0,26), UDim2.new(1,-210,0.5,-13),
+		"Save", "Apply to script + backup", Color3.fromRGB(56,102,65))
+	local exportBtn = button(top, UDim2.new(0,90,0,26), UDim2.new(1,-112,0.5,-13),
+		"Export", "Write to file", Color3.fromRGB(59,89,152))
+	local closeBtn = textBox(top, UDim2.new(0,28,0,26), UDim2.new(1,-42,0.5,-13))
+	closeBtn.Text = "X"
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 16
+	closeBtn.TextXAlignment = Enum.TextXAlignment.Center
 
-	local right = Instance.new("Frame")
-	right.Position = UDim2.new(0,124,0,0)
-	right.Size = UDim2.new(1,-124,1,0)
-	right.BackgroundColor3 = Color3.fromRGB(20,20,22)
-	right.BorderSizePixel = 0
-	right.Parent = content
+	-- kill editing on the X textbox
+	closeBtn.ClearTextOnFocus = false
+	closeBtn.TextEditable = false
 
-	-- search
-	local searchBox = Instance.new("TextBox")
-	searchBox.Size = UDim2.new(0,200,0,24)
-	searchBox.Position = UDim2.new(0,6,0,6)
-	searchBox.BackgroundColor3 = Color3.fromRGB(26,26,30)
-	searchBox.BorderSizePixel = 0
-	searchBox.Font = Enum.Font.SourceSans
-	searchBox.PlaceholderText = "🔍 search in script..."
-	searchBox.ClearTextOnFocus = false
-	searchBox.TextColor3 = Color3.new(1,1,1)
-	searchBox.TextSize = 14
-	searchBox.Parent = right
-	local sbc = Instance.new("UICorner"); sbc.CornerRadius = UDim.new(0,6); sbc.Parent = searchBox
+	-- left tabs: Script / Properties / Info
+	local leftTabs = roundedFrame(main, UDim2.new(0,140,1,-34), UDim2.new(0,0,0,34), Color3.fromRGB(22,22,28))
+	local scriptTab = button(leftTabs, UDim2.new(1,-14,0,34), UDim2.new(0,7,0,8),
+		"📜 Script", "Live source editing", Color3.fromRGB(60,70,120))
+	local propTab = button(leftTabs, UDim2.new(1,-14,0,34), UDim2.new(0,7,0,50),
+		"⚙️ Properties", "Quick tweaks", Color3.fromRGB(34,34,44))
+	local infoTab = button(leftTabs, UDim2.new(1,-14,0,34), UDim2.new(0,7,0,92),
+		"ℹ️ Instance Info", "Path + type", Color3.fromRGB(34,34,44))
 
-	local searchNext = Instance.new("TextButton")
-	searchNext.Size = UDim2.new(0,70,0,24)
-	searchNext.Position = UDim2.new(0,210,0,6)
-	searchNext.BackgroundColor3 = Color3.fromRGB(45,45,60)
-	searchNext.BorderSizePixel = 0
-	searchNext.Font = Enum.Font.SourceSansSemibold
-	searchNext.Text = "Next"
-	searchNext.TextSize = 14
-	searchNext.TextColor3 = Color3.new(1,1,1)
-	searchNext.Parent = right
-	local snc = Instance.new("UICorner"); snc.CornerRadius = UDim.new(0,6); snc.Parent = searchNext
+	local right = roundedFrame(main, UDim2.new(1,-150,1,-40), UDim2.new(0,146,0,38), Color3.fromRGB(16,16,22))
 
-	-- script area
+	-- script editor
 	local scriptScroll = Instance.new("ScrollingFrame")
 	scriptScroll.Name = "ScriptScroll"
-	scriptScroll.Position = UDim2.new(0,6,0,34)
-	scriptScroll.Size = UDim2.new(1,-12,1,-40)
-	scriptScroll.BackgroundColor3 = Color3.fromRGB(16,16,18)
+	scriptScroll.Parent = right
+	scriptScroll.Position = UDim2.new(0,6,0,40)
+	scriptScroll.Size = UDim2.new(1,-12,1,-46)
+	scriptScroll.BackgroundColor3 = Color3.fromRGB(10,10,16)
 	scriptScroll.BorderSizePixel = 0
 	scriptScroll.ScrollBarThickness = 6
 	scriptScroll.CanvasSize = UDim2.new(0,0,0,0)
-	scriptScroll.Parent = right
-	local ssc = Instance.new("UICorner"); ssc.CornerRadius = UDim.new(0,6); ssc.Parent = scriptScroll
+	local scCorner = Instance.new("UICorner"); scCorner.CornerRadius = UDim.new(0,8); scCorner.Parent = scriptScroll
 
 	local codeBox = Instance.new("TextBox")
+	codeBox.Parent = scriptScroll
 	codeBox.BackgroundTransparency = 1
-	codeBox.Size = UDim2.new(1,-8,1,-8)
-	codeBox.Position = UDim2.new(0,4,0,4)
 	codeBox.ClearTextOnFocus = false
 	codeBox.MultiLine = true
-	codeBox.TextXAlignment = Enum.TextXAlignment.Left
-	codeBox.TextYAlignment = Enum.TextYAlignment.Top
+	codeBox.Size = UDim2.new(1,-10,1,-10)
+	codeBox.Position = UDim2.new(0,6,0,6)
 	codeBox.Font = Enum.Font.Code
 	codeBox.TextSize = 15
 	codeBox.TextColor3 = Color3.new(1,1,1)
+	codeBox.TextXAlignment = Enum.TextXAlignment.Left
+	codeBox.TextYAlignment = Enum.TextYAlignment.Top
 	codeBox.Text = ""
-	codeBox.Parent = scriptScroll
 
 	codeBox:GetPropertyChangedSignal("TextBounds"):Connect(function()
-		scriptScroll.CanvasSize = UDim2.new(0,0,0,codeBox.TextBounds.Y+12)
+		scriptScroll.CanvasSize = UDim2.new(0,0,0,codeBox.TextBounds.Y+20)
 	end)
 
-	-- properties area
+	local searchBox = textBox(right, UDim2.new(0,220,0,26), UDim2.new(0,8,0,8), "Search in script...", false)
+	local searchNextBtn = button(right, UDim2.new(0,70,0,26), UDim2.new(0,236,0,8),
+		"Next", "", Color3.fromRGB(40,40,64))
+
+	-- properties view
 	local propFrame = Instance.new("ScrollingFrame")
-	propFrame.Name = "PropFrame"
-	propFrame.Position = UDim2.new(0,6,0,34)
-	propFrame.Size = UDim2.new(1,-12,1,-40)
-	propFrame.BackgroundColor3 = Color3.fromRGB(16,16,18)
+	propFrame.Parent = right
+	propFrame.Position = UDim2.new(0,6,0,40)
+	propFrame.Size = UDim2.new(1,-12,1,-46)
+	propFrame.BackgroundColor3 = Color3.fromRGB(10,10,16)
 	propFrame.BorderSizePixel = 0
 	propFrame.ScrollBarThickness = 6
-	propFrame.CanvasSize = UDim2.new(0,0,0,0)
 	propFrame.Visible = false
-	propFrame.Parent = right
-	local pfc = Instance.new("UICorner"); pfc.CornerRadius = UDim.new(0,6); pfc.Parent = propFrame
-
+	local pfCorner = Instance.new("UICorner"); pfCorner.CornerRadius = UDim.new(0,8); pfCorner.Parent = propFrame
 	local propLayout = Instance.new("UIListLayout")
-	propLayout.Padding = UDim.new(0,4)
-	propLayout.FillDirection = Enum.FillDirection.Vertical
-	propLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	propLayout.Parent = propFrame
+	propLayout.Padding = UDim.new(0,4)
+	propLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
+	-- info view
+	local infoFrame = Instance.new("Frame")
+	infoFrame.Parent = right
+	infoFrame.Position = UDim2.new(0,6,0,40)
+	infoFrame.Size = UDim2.new(1,-12,1,-46)
+	infoFrame.BackgroundColor3 = Color3.fromRGB(10,10,16)
+	infoFrame.BorderSizePixel = 0
+	infoFrame.Visible = false
+	local ifCorner = Instance.new("UICorner"); ifCorner.CornerRadius = UDim.new(0,8); ifCorner.Parent = infoFrame
+
+	local infoName = label(infoFrame, "Name: -", UDim2.new(1,-20,0,24), UDim2.new(0,10,0,10), 16, true)
+	local infoClass = label(infoFrame, "Class: -", UDim2.new(1,-20,0,24), UDim2.new(0,10,0,40), 15, false)
+	local infoPath = label(infoFrame, "Path: -", UDim2.new(1,-20,0,80), UDim2.new(0,10,0,70), 14, false)
+	infoPath.TextWrapped = true
+
+	-- tab switching
+	local function selectTab(which)
+		if which == "script" then
+			scriptScroll.Visible = true
+			propFrame.Visible = false
+			infoFrame.Visible = false
+			scriptTab.BackgroundColor3 = Color3.fromRGB(60,70,120)
+			propTab.BackgroundColor3   = Color3.fromRGB(34,34,44)
+			infoTab.BackgroundColor3   = Color3.fromRGB(34,34,44)
+		elseif which == "props" then
+			scriptScroll.Visible = false
+			propFrame.Visible = true
+			infoFrame.Visible = false
+			scriptTab.BackgroundColor3 = Color3.fromRGB(34,34,44)
+			propTab.BackgroundColor3   = Color3.fromRGB(60,70,120)
+			infoTab.BackgroundColor3   = Color3.fromRGB(34,34,44)
+		else
+			scriptScroll.Visible = false
+			propFrame.Visible = false
+			infoFrame.Visible = true
+			scriptTab.BackgroundColor3 = Color3.fromRGB(34,34,44)
+			propTab.BackgroundColor3   = Color3.fromRGB(34,34,44)
+			infoTab.BackgroundColor3   = Color3.fromRGB(60,70,120)
+		end
+	end
+
+	scriptTab.Activated:Connect(function() selectTab("script") end)
+	propTab.Activated:Connect(function() selectTab("props") end)
+	infoTab.Activated:Connect(function() selectTab("info") end)
+
+	-- prop refresh
 	local function refreshProps(inst)
 		for _, child in ipairs(propFrame:GetChildren()) do
 			if child:IsA("Frame") then child:Destroy() end
 		end
 		if not inst then return end
 
-		local show = {"Name","ClassName","Archivable","Transparency","Anchored","CanCollide","Text","Value"}
-		for _, propName in ipairs(show) do
+		local wanted = {
+			"Name","ClassName","Parent","Archivable",
+			"Transparency","Anchored","CanCollide","Size",
+			"Position","Text","Value","BrickColor","Color"
+		}
+
+		for _, propName in ipairs(wanted) do
 			local ok, val = pcall(function() return inst[propName] end)
 			if ok then
 				local row = Instance.new("Frame")
-				row.Size = UDim2.new(1,-8,0,26)
+				row.Size = UDim2.new(1,-10,0,26)
 				row.BackgroundTransparency = 1
 				row.Parent = propFrame
 
-				local lbl = Instance.new("TextLabel")
-				lbl.BackgroundTransparency = 1
-				lbl.Size = UDim2.new(0.35,0,1,0)
-				lbl.Font = Enum.Font.SourceSans
-				lbl.TextSize = 14
-				lbl.TextXAlignment = Enum.TextXAlignment.Left
-				lbl.TextColor3 = Color3.new(1,1,1)
-				lbl.Text = propName
-				lbl.Parent = row
-
-				local box = Instance.new("TextBox")
-				box.Size = UDim2.new(0.65,-4,1,0)
-				box.Position = UDim2.new(0.35,4,0,0)
-				box.BackgroundColor3 = Color3.fromRGB(26,26,30)
-				box.BorderSizePixel = 0
-				box.ClearTextOnFocus = false
-				box.Font = Enum.Font.Code
-				box.TextSize = 14
-				box.TextXAlignment = Enum.TextXAlignment.Left
-				box.TextColor3 = Color3.new(1,1,1)
+				local lbl = label(row, propName, UDim2.new(0.35,0,1,0), UDim2.new(0,0,0,0), 14, false)
+				local box = textBox(row, UDim2.new(0.65,-4,1,0), UDim2.new(0.35,4,0,0), "", true)
 				box.Text = tostring(val)
-				box.Parent = row
-				local bc2 = Instance.new("UICorner"); bc2.CornerRadius = UDim.new(0,4); bc2.Parent = box
 
 				local original = val
 				box.FocusLost:Connect(function(enter)
 					if not enter then return end
 					local text = box.Text
-					local newVal = text
 					local t = typeof(original)
+					local newVal = text
+
 					if t == "number" then
 						newVal = tonumber(text) or original
 					elseif t == "boolean" then
-						local l = string.lower(text)
+						local l = text:lower()
 						newVal = (l=="true" or l=="1" or l=="yes")
+					elseif t == "BrickColor" then
+						local okB, bc = pcall(function() return BrickColor.new(text) end)
+						if okB then newVal = bc else newVal = original end
 					end
-					local okSet, err = pcall(function() inst[propName] = newVal end)
-					if not okSet then
-						warn("[KoroneEditor] Failed to set "..propName..": "..tostring(err))
-						box.Text = tostring(original)
-					else
+
+					local okSet, err = pcall(function()
+						inst[propName] = newVal
+					end)
+					if okSet then
 						original = newVal
+					else
+						warnLog("Failed to set "..propName..": "..tostring(err))
+						box.Text = tostring(original)
 					end
 				end)
 			end
 		end
-		propFrame.CanvasSize = UDim2.new(0,0,0,propLayout.AbsoluteContentSize.Y+8)
+
+		propFrame.CanvasSize = UDim2.new(0,0,0,propLayout.AbsoluteContentSize.Y+12)
 	end
 
-	local function selectTab(which)
-		if which == "script" then
-			scriptScroll.Visible = true
-			propFrame.Visible = false
-			scriptTab.BackgroundColor3 = Color3.fromRGB(40,40,48)
-			propTab.BackgroundColor3 = Color3.fromRGB(26,26,30)
-		else
-			scriptScroll.Visible = false
-			propFrame.Visible = true
-			scriptTab.BackgroundColor3 = Color3.fromRGB(26,26,30)
-			propTab.BackgroundColor3 = Color3.fromRGB(40,40,48)
+	-- info refresh
+	local function instPath(inst)
+		local segs = {}
+		local current = inst
+		while current ~= nil do
+			table.insert(segs,1,current.Name)
+			current = current.Parent
 		end
+		return table.concat(segs,".")
 	end
 
-	scriptTab.MouseButton1Click:Connect(function() selectTab("script") end)
-	propTab.MouseButton1Click:Connect(function() selectTab("props") end)
+	local function refreshInfo(inst)
+		if not inst then
+			infoName.Text  = "Name: -"
+			infoClass.Text = "Class: -"
+			infoPath.Text  = "Path: -"
+			return
+		end
+		infoName.Text  = "Name: "..inst.Name
+		infoClass.Text = "Class: "..inst.ClassName
+		infoPath.Text  = "Path: "..instPath(inst)
+	end
 
-	-- search logic
+	-- search in script
 	local lastIndex = 1
 	local function doSearch()
 		local q = searchBox.Text
 		local text = codeBox.Text
-		if q=="" or text=="" then return end
-		local start = string.find(string.lower(text), string.lower(q), lastIndex, true)
-		if not start then start = string.find(string.lower(text), string.lower(q), 1, true) end
+		if q == "" or text == "" then return end
+		local lowerText = text:lower()
+		local lowerQ = q:lower()
+		local start = string.find(lowerText, lowerQ, lastIndex, true)
+		if not start then
+			start = string.find(lowerText, lowerQ, 1, true)
+		end
 		if start then
-			local before = string.sub(text,1,start)
+			local before = string.sub(text, 1, start)
 			local _, lines = string.gsub(before,"\n","")
 			codeBox.CursorPosition = start + #q
-			scriptScroll.CanvasPosition = Vector2.new(0,(lines-1)*16)
+			scriptScroll.CanvasPosition = Vector2.new(0, (lines-1)*16)
 			lastIndex = start + #q
 		end
 	end
-	searchNext.MouseButton1Click:Connect(doSearch)
+
+	searchNextBtn.Activated:Connect(doSearch)
 	searchBox.FocusLost:Connect(function(enter)
-		if enter then lastIndex = 1; doSearch() end
+		if enter then
+			lastIndex = 1
+			doSearch()
+		end
 	end)
 
 	-- buttons
-	btnClose.MouseButton1Click:Connect(function()
-		gui.Enabled = false
-		KS_Editor.CurrentInstance = nil
-	end)
-
-	btnSave.MouseButton1Click:Connect(function()
-		local inst = KS_Editor.CurrentInstance
-		if not inst then return end
-		if inst:IsA("LuaSourceContainer") then
-			local src = codeBox.Text or ""
-			safe(function()
-				KS_UTIL.applyScriptSource(inst, src)
-				KS_UTIL.exportScript(inst)
-			end)
-			print("[KoroneEditor] Saved script + exported file.")
-		else
-			refreshProps(inst)
+	closeBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			gui.Enabled = false
+			KS_Editor.Current = nil
 		end
 	end)
 
-	btnExport.MouseButton1Click:Connect(function()
-		local inst = KS_Editor.CurrentInstance
-		if not inst then return end
-		if inst:IsA("LuaSourceContainer") then
-			safe(KS_UTIL.exportScript, inst)
+	saveBtn.Activated:Connect(function()
+		local inst = KS_Editor.Current
+		if not inst or not inst:IsA("LuaSourceContainer") then return end
+		local src = codeBox.Text
+
+		-- optional backup
+		if CAP.canFS then
+			local folder = "KoroneStudioBackups/"..tostring(game.PlaceId)
+			KUTIL.ensureFolders(folder)
+			local name = inst.Name:gsub("[^%w_]+","_")
+			local filename = folder.."/"..name.."_"..os.time()..".lua"
+			KUTIL.writeFile(filename, src)
+		end
+
+		local ok, err = applySource(inst, src)
+		if ok then
+			log("Applied script changes to", inst:GetFullName())
 		else
-			safe(KS_UTIL.exportInstance, inst, {name = inst.Name})
+			warnLog("Failed to apply script:", err)
 		end
 	end)
 
-	makeDraggable(top, main)
+	exportBtn.Activated:Connect(function()
+		local inst = KS_Editor.Current
+		if not inst then return end
+		if not CAP.canFS then
+			warnLog("Filesystem not supported: cannot export.")
+			return
+		end
+		local folder = "KoroneStudioExports/"..tostring(game.PlaceId).."/Scripts"
+		KUTIL.ensureFolders(folder)
+		local src = inst:IsA("LuaSourceContainer") and tryDecompile(inst) or "-- not a script"
+		local safeName = inst.Name:gsub("[^%w_]+","_")
+		local path = folder.."/"..safeName.."_"..inst.ClassName..".lua"
+		if KUTIL.writeFile(path, src) then
+			log("Exported to", path)
+		end
+	end)
+
+	KUTIL.makeDraggable(top, main)
 
 	KS_Editor.Gui = gui
-	KS_Editor.Widgets = {
-		Title = title,
-		CodeBox = codeBox,
-		SelectTab = selectTab,
+	KS_Editor._widgets = {
+		Title      = title,
+		CodeBox    = codeBox,
+		SelectTab  = selectTab,
 		RefreshProps = refreshProps,
+		RefreshInfo  = refreshInfo,
 	}
 end
 
 function KS_Editor.Open(inst)
-	if not inst or typeof(inst) ~= "Instance" then
-		error("KoroneEditor.Open expects an Instance")
-	end
-	createEditorGui()
+	if not inst or typeof(inst) ~= "Instance" then return end
+	createEditor()
 	KS_Editor.Gui.Enabled = true
-	KS_Editor.CurrentInstance = inst
+	KS_Editor.Current = inst
 
-	local w = KS_Editor.Widgets
-	w.Title.Text = ("✏️ Korone Editor — %s (%s)"):format(inst.Name, inst.ClassName)
+	local w = KS_Editor._widgets
+	w.Title.Text = ("✏️ Korone Live Editor — %s (%s)"):format(inst.Name, inst.ClassName)
+
 	if inst:IsA("LuaSourceContainer") then
-		w.CodeBox.Text = KS_UTIL.getScriptSource(inst)
+		w.CodeBox.Text = tryDecompile(inst)
 		w.SelectTab("script")
 	else
-		w.CodeBox.Text = "-- Not a script. Use the ⚙️ Properties tab."
+		w.CodeBox.Text = "-- Not a script. Use Properties / Info."
 		w.SelectTab("props")
 	end
 	w.RefreshProps(inst)
+	w.RefreshInfo(inst)
 end
 
-_G.KS_Editor = KS_Editor
-
 -------------------------------
--- Korone Explorer (Studio-like tree)
+-- EXPLORER UI (Dex-like)
 -------------------------------
-local KS_Explorer = { Gui = nil, Selected = nil }
-
-local function createExplorerGui()
+local function createExplorer()
 	if KS_Explorer.Gui then return end
 
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "KoroneExplorer"
-	gui.ResetOnSpawn = false
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Enabled = false
-	gui.Parent = CoreGui
+	local gui = newScreenGui("KoroneExplorerV2")
+	local main = roundedFrame(gui, UDim2.new(0,520,0,420), UDim2.new(0,12,0.5,-210), Color3.fromRGB(16,16,20))
+	local top  = roundedFrame(main, UDim2.new(1,0,0,32), UDim2.new(0,0,0,0), Color3.fromRGB(26,26,30), UDim.new(0,10))
+	local title = label(top, "🗂 Korone Explorer 2026", UDim2.new(1,-120,1,0), UDim2.new(0,10,0,0), 18, true)
 
-	local main = Instance.new("Frame")
-	main.AnchorPoint = Vector2.new(0,0.5)
-	main.Position = UDim2.new(0,16,0.5,0)
-	main.Size = UDim2.new(0,460,0,380)
-	main.BackgroundColor3 = Color3.fromRGB(18,18,20)
-	main.BorderSizePixel = 0
-	main.Parent = gui
-	local mc = Instance.new("UICorner"); mc.CornerRadius = UDim.new(0,10); mc.Parent = main
+	local closeBtn = textBox(top, UDim2.new(0,26,0,24), UDim2.new(1,-34,0.5,-12), "", false)
+	closeBtn.Text = "X"
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 16
+	closeBtn.TextXAlignment = Enum.TextXAlignment.Center
+	closeBtn.TextEditable = false
 
-	local top = Instance.new("Frame")
-	top.Size = UDim2.new(1,0,0,30)
-	top.BackgroundColor3 = Color3.fromRGB(26,26,30)
-	top.BorderSizePixel = 0
-	top.Parent = main
-	local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(0,10); tc.Parent = top
-
-	local title = Instance.new("TextLabel")
-	title.BackgroundTransparency = 1
-	title.Size = UDim2.new(1,-90,1,0)
-	title.Position = UDim2.new(0,8,0,0)
-	title.Font = Enum.Font.SourceSansSemibold
-	title.TextSize = 18
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextColor3 = Color3.new(1,1,1)
-	title.Text = "🗂 Korone Explorer"
-	title.Parent = top
-
-	local btnClose = Instance.new("TextButton")
-	btnClose.Size = UDim2.new(0,26,0,22)
-	btnClose.Position = UDim2.new(1,-30,0.5,-11)
-	btnClose.BackgroundColor3 = Color3.fromRGB(70,35,35)
-	btnClose.BorderSizePixel = 0
-	btnClose.Font = Enum.Font.SourceSansBold
-	btnClose.Text = "X"
-	btnClose.TextSize = 16
-	btnClose.TextColor3 = Color3.new(1,1,1)
-	btnClose.Parent = top
-	local bcc = Instance.new("UICorner"); bcc.CornerRadius = UDim.new(0,6); bcc.Parent = btnClose
+	local searchBox = textBox(top, UDim2.new(0,220,0,24), UDim2.new(0,8,0.5,-12), "Search instance name...", false)
 
 	local content = Instance.new("Frame")
-	content.Position = UDim2.new(0,0,0,30)
-	content.Size = UDim2.new(1,0,1,-30)
-	content.BackgroundTransparency = 1
 	content.Parent = main
+	content.BackgroundTransparency = 1
+	content.Size = UDim2.new(1,0,1,-34)
+	content.Position = UDim2.new(0,0,0,34)
+
+	local left = roundedFrame(content, UDim2.new(0.55, -6, 1,-8), UDim2.new(0,4,0,4), Color3.fromRGB(18,18,24))
+	local right = roundedFrame(content, UDim2.new(0.45, -6, 1,-8), UDim2.new(0.55,2,0,4), Color3.fromRGB(18,18,24))
 
 	local tree = Instance.new("ScrollingFrame")
+	tree.Parent = left
 	tree.Name = "Tree"
-	tree.Position = UDim2.new(0,4,0,4)
-	tree.Size = UDim2.new(0.5,-6,1,-8)
-	tree.BackgroundColor3 = Color3.fromRGB(20,20,22)
+	tree.BackgroundColor3 = Color3.fromRGB(10,10,16)
 	tree.BorderSizePixel = 0
-	tree.ScrollBarThickness = 6
+	tree.Position = UDim2.new(0,4,0,4)
+	tree.Size = UDim2.new(1,-8,1,-8)
 	tree.CanvasSize = UDim2.new(0,0,0,0)
-	tree.Parent = content
-	local tc2 = Instance.new("UICorner"); tc2.CornerRadius = UDim.new(0,6); tc2.Parent = tree
+	tree.ScrollBarThickness = 6
+	local trC = Instance.new("UICorner"); trC.CornerRadius = UDim.new(0,8); trC.Parent = tree
 
 	local treeLayout = Instance.new("UIListLayout")
-	treeLayout.Padding = UDim.new(0,2)
-	treeLayout.FillDirection = Enum.FillDirection.Vertical
-	treeLayout.SortOrder = Enum.SortOrder.LayoutOrder
 	treeLayout.Parent = tree
+	treeLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	treeLayout.Padding = UDim.new(0,2)
 
-	local right = Instance.new("Frame")
-	right.Position = UDim2.new(0.5,2,0,4)
-	right.Size = UDim2.new(0.5,-6,1,-8)
-	right.BackgroundColor3 = Color3.fromRGB(20,20,22)
-	right.BorderSizePixel = 0
-	right.Parent = content
-	local rc = Instance.new("UICorner"); rc.CornerRadius = UDim.new(0,6); rc.Parent = right
+	local instLabel = label(right, "Instance: (none)", UDim2.new(1,-10,0,24), UDim2.new(0,6,0,6), 16, true)
+	local openEditBtn = button(right, UDim2.new(0.5,-10,0,26), UDim2.new(0,6,0,36),
+		"✏️ Live Edit", "", Color3.fromRGB(56,102,65))
+	local exportBtn = button(right, UDim2.new(0.5,-10,0,26), UDim2.new(0.5,4,0,36),
+		"📤 Export JSON", "", Color3.fromRGB(59,89,152))
 
-	local nameLabel = Instance.new("TextLabel")
-	nameLabel.BackgroundTransparency = 1
-	nameLabel.Size = UDim2.new(1,-10,0,24)
-	nameLabel.Position = UDim2.new(0,5,0,5)
-	nameLabel.Font = Enum.Font.SourceSansSemibold
-	nameLabel.TextSize = 18
-	nameLabel.TextXAlignment = Enum.TextXAlignment.Left
-	nameLabel.TextColor3 = Color3.new(1,1,1)
-	nameLabel.Text = "Instance: (none)"
-	nameLabel.Parent = right
+	local quickProps = Instance.new("ScrollingFrame")
+	quickProps.Parent = right
+	quickProps.Name = "QuickProps"
+	quickProps.BackgroundTransparency = 1
+	quickProps.BorderSizePixel = 0
+	quickProps.Position = UDim2.new(0,6,0,70)
+	quickProps.Size = UDim2.new(1,-12,1,-76)
+	quickProps.CanvasSize = UDim2.new(0,0,0,0)
+	quickProps.ScrollBarThickness = 6
+	local qpLayout = Instance.new("UIListLayout")
+	qpLayout.Parent = quickProps
+	qpLayout.Padding = UDim.new(0,2)
+	qpLayout.SortOrder = Enum.SortOrder.LayoutOrder
 
-	local btnEdit = Instance.new("TextButton")
-	btnEdit.Size = UDim2.new(0,120,0,24)
-	btnEdit.Position = UDim2.new(0,6,0,34)
-	btnEdit.BackgroundColor3 = Color3.fromRGB(56,102,65)
-	btnEdit.BorderSizePixel = 0
-	btnEdit.Font = Enum.Font.SourceSansSemibold
-	btnEdit.Text = "✏️ Open Editor"
-	btnEdit.TextSize = 14
-	btnEdit.TextColor3 = Color3.new(1,1,1)
-	btnEdit.Parent = right
-	local bec = Instance.new("UICorner"); bec.CornerRadius = UDim.new(0,6); bec.Parent = btnEdit
-
-	local btnExport = Instance.new("TextButton")
-	btnExport.Size = UDim2.new(0,120,0,24)
-	btnExport.Position = UDim2.new(0,134,0,34)
-	btnExport.BackgroundColor3 = Color3.fromRGB(59,89,152)
-	btnExport.BorderSizePixel = 0
-	btnExport.Font = Enum.Font.SourceSansSemibold
-	btnExport.Text = "📤 Export JSON"
-	btnExport.TextSize = 14
-	btnExport.TextColor3 = Color3.new(1,1,1)
-	btnExport.Parent = right
-	local bex = Instance.new("UICorner"); bex.CornerRadius = UDim.new(0,6); bex.Parent = btnExport
-
-	local propList = Instance.new("ScrollingFrame")
-	propList.Name = "Props"
-	propList.Position = UDim2.new(0,6,0,64)
-	propList.Size = UDim2.new(1,-12,1,-70)
-	propList.BackgroundTransparency = 1
-	propList.BorderSizePixel = 0
-	propList.ScrollBarThickness = 6
-	propList.CanvasSize = UDim2.new(0,0,0,0)
-	propList.Parent = right
-
-	local propLayout = Instance.new("UIListLayout")
-	propLayout.Padding = UDim.new(0,2)
-	propLayout.FillDirection = Enum.FillDirection.Vertical
-	propLayout.SortOrder = Enum.SortOrder.LayoutOrder
-	propLayout.Parent = propList
-
-	local function addPropRow(name, val)
-		local row = Instance.new("TextLabel")
-		row.BackgroundTransparency = 1
-		row.Size = UDim2.new(1,-4,0,18)
-		row.Font = Enum.Font.SourceSans
-		row.TextSize = 13
+	local function addQuickProp(name, val)
+		local row = label(quickProps, name.." = "..tostring(val), UDim2.new(1,-4,0,18), UDim2.new(0,0,0,0), 13, false)
 		row.TextXAlignment = Enum.TextXAlignment.Left
-		row.TextColor3 = Color3.new(1,1,1)
-		row.Text = name.." = "..tostring(val)
-		row.Parent = propList
 	end
+
+	local function refreshQuickProps(inst)
+		for _, c in ipairs(quickProps:GetChildren()) do
+			if c:IsA("TextLabel") then c:Destroy() end
+		end
+		if not inst then
+			instLabel.Text = "Instance: (none)"
+		else
+			instLabel.Text = ("Instance: %s (%s)"):format(inst.Name, inst.ClassName)
+			for _, p in ipairs({"Name","ClassName","Parent","Archivable","Transparency","Anchored","CanCollide"}) do
+				local ok, v = pcall(function() return inst[p] end)
+				if ok then addQuickProp(p,v) end
+			end
+		end
+		quickProps.CanvasSize = UDim2.new(0,0,0,qpLayout.AbsoluteContentSize.Y+8)
+	end
+
+	-- Build tree (limited for performance; you can expand if you want)
+	local roots = {
+		game:GetService("Workspace"),
+		game:GetService("Players"),
+		game:GetService("ReplicatedStorage"),
+		game:GetService("StarterGui"),
+		game:GetService("StarterPlayer"),
+		game:GetService("Lighting"),
+	}
+
+	local allButtons = {} -- for search filter
 
 	local function iconFor(inst)
 		if inst:IsA("Folder") or inst:IsA("Model") then return "📁"
@@ -708,39 +699,29 @@ local function createExplorerGui()
 		else return "🔹" end
 	end
 
-	local function buildTree(inst, depth)
-		depth = depth or 0
+	local function buildNode(inst, depth)
 		local btn = Instance.new("TextButton")
-		btn.Size = UDim2.new(1,-4,0,22)
-		btn.BackgroundColor3 = Color3.fromRGB(26,26,30)
-		btn.BorderSizePixel = 0
+		btn.Parent = tree
 		btn.AutoButtonColor = true
-		btn.Font = Enum.Font.SourceSans
-		btn.TextSize = 14
+		btn.BackgroundColor3 = Color3.fromRGB(18,18,26)
+		btn.BorderSizePixel = 0
+		btn.Size = UDim2.new(1,-8,0,22)
 		btn.TextXAlignment = Enum.TextXAlignment.Left
+		btn.Font = Enum.Font.Gotham
+		btn.TextSize = 14
 		btn.TextColor3 = Color3.new(1,1,1)
 		btn.Text = string.rep("   ", depth)..iconFor(inst).." "..inst.Name.." ["..inst.ClassName.."]"
-		btn.Parent = tree
-		local bc3 = Instance.new("UICorner"); bc3.CornerRadius = UDim.new(0,4); bc3.Parent = btn
 
-		btn.MouseButton1Click:Connect(function()
-			KS_Explorer.Selected = inst
-			nameLabel.Text = "Instance: "..inst.Name.." ("..inst.ClassName..")"
+		local bc = Instance.new("UICorner"); bc.CornerRadius = UDim.new(0,4); bc.Parent = btn
 
-			for _, c in ipairs(propList:GetChildren()) do
-				if c:IsA("TextLabel") then c:Destroy() end
-			end
+		btn:SetAttribute("InstanceRef", inst)
+		table.insert(allButtons, btn)
 
-			for _, p in ipairs({"Name","ClassName","Parent","Archivable","Transparency","Anchored","CanCollide","Text","Value"}) do
-				local ok, v = pcall(function() return inst[p] end)
-				if ok then addPropRow(p,v) end
-			end
-			propList.CanvasSize = UDim2.new(0,0,0,propLayout.AbsoluteContentSize.Y+8)
-		end)
-
-		-- double-click = open editor
 		local lastClick = 0
-		btn.MouseButton1Click:Connect(function()
+		btn.Activated:Connect(function()
+			KS_Explorer.Selected = inst
+			refreshQuickProps(inst)
+
 			local now = tick()
 			if now - lastClick <= 0.3 then
 				KS_Editor.Open(inst)
@@ -749,174 +730,214 @@ local function createExplorerGui()
 		end)
 
 		for _, child in ipairs(inst:GetChildren()) do
-			buildTree(child, depth+1)
+			safe(buildNode, child, depth+1)
 		end
 	end
 
-	for _, root in ipairs({
-		game:GetService("Workspace"),
-		game:GetService("Players"),
-		game:GetService("ReplicatedStorage"),
-		game:GetService("StarterGui"),
-	}) do
-		if root then buildTree(root,0) end
+	for _, root in ipairs(roots) do
+		if root then
+			safe(buildNode, root, 0)
+		end
 	end
 
 	tree.CanvasSize = UDim2.new(0,0,0,treeLayout.AbsoluteContentSize.Y+8)
 
-	btnEdit.MouseButton1Click:Connect(function()
-		if KS_Explorer.Selected then KS_Editor.Open(KS_Explorer.Selected) end
-	end)
-	btnExport.MouseButton1Click:Connect(function()
-		local inst = KS_Explorer.Selected
-		if not inst then return end
-		if inst:IsA("LuaSourceContainer") then
-			safe(KS_UTIL.exportScript, inst)
-		else
-			safe(KS_UTIL.exportInstance, inst, {name = inst.Name})
+	-- search filter (hide non-matching buttons)
+	local function applySearch()
+		local q = searchBox.Text:lower()
+		for _, btn in ipairs(allButtons) do
+			if btn.Parent then
+				local text = btn.Text:lower()
+				btn.Visible = (q == "" or string.find(text, q, 1, true) ~= nil)
+			end
+		end
+	end
+
+	searchBox:GetPropertyChangedSignal("Text"):Connect(applySearch)
+
+	openEditBtn.Activated:Connect(function()
+		if KS_Explorer.Selected then
+			KS_Editor.Open(KS_Explorer.Selected)
 		end
 	end)
-	btnClose.MouseButton1Click:Connect(function()
-		gui.Enabled = false
+
+	exportBtn.Activated:Connect(function()
+		local inst = KS_Explorer.Selected
+		if not inst then return end
+		if not CAP.canFS then
+			warnLog("Cannot export: filesystem not supported.")
+			return
+		end
+		local folder = "KoroneStudioExports/"..tostring(game.PlaceId).."/Instances"
+		KUTIL.ensureFolders(folder)
+
+		-- simple recursive export
+		local function decomposeNode(node, depth, maxDepth)
+			depth = depth or 0
+			maxDepth = maxDepth or 6
+			if depth > maxDepth then
+				return { __truncated = true, Name=node.Name, ClassName=node.ClassName }
+			end
+
+			local info = {
+				Name = node.Name,
+				ClassName = node.ClassName,
+				Children = {},
+				Properties = {}
+			}
+
+			for _, propName in ipairs({"Name","ClassName","Parent","Archivable","Transparency","Anchored","CanCollide","Size","Position","Text","Value"}) do
+				local ok, v = pcall(function() return node[propName] end)
+				if ok then info.Properties[propName] = v end
+			end
+
+			for _, child in ipairs(node:GetChildren()) do
+				table.insert(info.Children, decomposeNode(child, depth+1, maxDepth))
+			end
+
+			return info
+		end
+
+		local treeData = decomposeNode(inst, 0, 6)
+		local json = HttpService:JSONEncode(treeData)
+		local safeName = inst.Name:gsub("[^%w_]+","_")
+		local path = folder.."/"..safeName..".json"
+		if KUTIL.writeFile(path, json) then
+			log("Exported JSON to", path)
+		end
 	end)
 
-	makeDraggable(top, main)
+	closeBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			gui.Enabled = false
+		end
+	end)
+
+	KUTIL.makeDraggable(top, main)
 	KS_Explorer.Gui = gui
 end
 
 function KS_Explorer.Toggle()
-	createExplorerGui()
+	createExplorer()
 	KS_Explorer.Gui.Enabled = not KS_Explorer.Gui.Enabled
 end
 
-_G.KS_Explorer = KS_Explorer
-
 -------------------------------
--- Korone Remote Spy (IY-style, but lighter)
+-- REMOTE SPY 2.0
 -------------------------------
-local KS_RSpy = { Gui = nil, Enabled = true, AddLog = nil }
-
-local function createRSpyGui()
+local function createRSpy()
 	if KS_RSpy.Gui then return end
 
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "KoroneRemoteSpy"
-	gui.ResetOnSpawn = false
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Enabled = false
-	gui.Parent = CoreGui
+	local gui = newScreenGui("KoroneRSpyV2")
+	local main = roundedFrame(gui, UDim2.new(0,560,0,320), UDim2.new(1,-20,0.5,-160), Color3.fromRGB(16,16,20))
+	local top  = roundedFrame(main, UDim2.new(1,0,0,32), UDim2.new(0,0,0,0), Color3.fromRGB(26,26,32), UDim.new(0,10))
+	local title = label(top, "📡 Korone Remote Spy 2.0", UDim2.new(1,-260,1,0), UDim2.new(0,10,0,0), 18, true)
 
-	local main = Instance.new("Frame")
-	main.AnchorPoint = Vector2.new(1,0.5)
-	main.Position = UDim2.new(1,-16,0.5,0)
-	main.Size = UDim2.new(0,480,0,280)
-	main.BackgroundColor3 = Color3.fromRGB(18,18,20)
-	main.BorderSizePixel = 0
-	main.Parent = gui
-	local mc = Instance.new("UICorner"); mc.CornerRadius = UDim.new(0,10); mc.Parent = main
+	local filterBox = textBox(top, UDim2.new(0,200,0,24), UDim2.new(0,180,0.5,-12), "Filter by name / path...", false)
 
-	local top = Instance.new("Frame")
-	top.Size = UDim2.new(1,0,0,30)
-	top.BackgroundColor3 = Color3.fromRGB(26,26,30)
-	top.BorderSizePixel = 0
-	top.Parent = main
-	local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(0,10); tc.Parent = top
+	local pauseBtn = button(top, UDim2.new(0,70,0,24), UDim2.new(1,-250,0.5,-12),
+		"Pause", "", Color3.fromRGB(60,60,90))
+	local clearBtn = button(top, UDim2.new(0,70,0,24), UDim2.new(1,-172,0.5,-12),
+		"Clear", "", Color3.fromRGB(90,60,60))
+	local toggleBtn = button(top, UDim2.new(0,90,0,24), UDim2.new(1,-92,0.5,-12),
+		"Enabled", "", Color3.fromRGB(56,102,65))
 
-	local title = Instance.new("TextLabel")
-	title.BackgroundTransparency = 1
-	title.Size = UDim2.new(1,-110,1,0)
-	title.Position = UDim2.new(0,8,0,0)
-	title.Font = Enum.Font.SourceSansSemibold
-	title.TextSize = 18
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextColor3 = Color3.new(1,1,1)
-	title.Text = "📡 Korone Remote Spy"
-	title.Parent = top
+	local closeBtn = textBox(top, UDim2.new(0,26,0,24), UDim2.new(1,-34,0.5,-12), "", false)
+	closeBtn.Text = "X"
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 16
+	closeBtn.TextXAlignment = Enum.TextXAlignment.Center
+	closeBtn.TextEditable = false
 
-	local btnClose = Instance.new("TextButton")
-	btnClose.Size = UDim2.new(0,26,0,22)
-	btnClose.Position = UDim2.new(1,-30,0.5,-11)
-	btnClose.BackgroundColor3 = Color3.fromRGB(70,35,35)
-	btnClose.BorderSizePixel = 0
-	btnClose.Font = Enum.Font.SourceSansBold
-	btnClose.Text = "X"
-	btnClose.TextSize = 16
-	btnClose.TextColor3 = Color3.new(1,1,1)
-	btnClose.Parent = top
-	local bcc = Instance.new("UICorner"); bcc.CornerRadius = UDim.new(0,6); bcc.Parent = btnClose
-
-	local btnToggle = Instance.new("TextButton")
-	btnToggle.Size = UDim2.new(0,90,0,22)
-	btnToggle.Position = UDim2.new(1,-130,0.5,-11)
-	btnToggle.BackgroundColor3 = Color3.fromRGB(45,90,45)
-	btnToggle.BorderSizePixel = 0
-	btnToggle.Font = Enum.Font.SourceSansSemibold
-	btnToggle.Text = "Enabled"
-	btnToggle.TextSize = 14
-	btnToggle.TextColor3 = Color3.new(1,1,1)
-	btnToggle.Parent = top
-	local btc = Instance.new("UICorner"); btc.CornerRadius = UDim.new(0,6); btc.Parent = btnToggle
-
-	local log = Instance.new("ScrollingFrame")
-	log.Name = "Log"
-	log.Position = UDim2.new(0,4,0,34)
-	log.Size = UDim2.new(1,-8,1,-38)
-	log.BackgroundColor3 = Color3.fromRGB(20,20,22)
-	log.BorderSizePixel = 0
-	log.ScrollBarThickness = 6
-	log.CanvasSize = UDim2.new(0,0,0,0)
-	log.Parent = main
-	local lc = Instance.new("UICorner"); lc.CornerRadius = UDim.new(0,6); lc.Parent = log
+	local logFrame = Instance.new("ScrollingFrame")
+	logFrame.Parent = main
+	logFrame.Name = "Log"
+	logFrame.BackgroundColor3 = Color3.fromRGB(10,10,16)
+	logFrame.BorderSizePixel = 0
+	logFrame.Position = UDim2.new(0,6,0,38)
+	logFrame.Size = UDim2.new(1,-12,1,-44)
+	logFrame.CanvasSize = UDim2.new(0,0,0,0)
+	logFrame.ScrollBarThickness = 6
+	local lfC = Instance.new("UICorner"); lfC.CornerRadius = UDim.new(0,8); lfC.Parent = logFrame
 
 	local layout = Instance.new("UIListLayout")
-	layout.Padding = UDim.new(0,2)
-	layout.FillDirection = Enum.FillDirection.Vertical
+	layout.Parent = logFrame
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Parent = log
+	layout.Padding = UDim.new(0,2)
 
 	local function addLog(line)
+		if KS_RSpy.Paused then return end
+
+		local filter = KS_RSpy.FilterText
+		if filter ~= "" and (not string.find(line:lower(), filter:lower(), 1, true)) then
+			return
+		end
+
 		local row = Instance.new("TextLabel")
+		row.Parent = logFrame
 		row.BackgroundTransparency = 1
-		row.Size = UDim2.new(1,-4,0,18)
-		row.Font = Enum.Font.SourceSans
+		row.Size = UDim2.new(1,-6,0,18)
+		row.Font = Enum.Font.Code
 		row.TextSize = 13
 		row.TextXAlignment = Enum.TextXAlignment.Left
 		row.TextColor3 = Color3.new(1,1,1)
 		row.Text = line
-		row.Parent = log
-		log.CanvasSize = UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+8)
+
+		logFrame.CanvasSize = UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+8)
 	end
 
 	KS_RSpy.AddLog = addLog
 
-	btnToggle.MouseButton1Click:Connect(function()
+	filterBox:GetPropertyChangedSignal("Text"):Connect(function()
+		KS_RSpy.FilterText = filterBox.Text or ""
+	end)
+
+	pauseBtn.Activated:Connect(function()
+		KS_RSpy.Paused = not KS_RSpy.Paused
+		pauseBtn.BackgroundColor3 = KS_RSpy.Paused and Color3.fromRGB(90,70,40) or Color3.fromRGB(60,60,90)
+	end)
+
+	clearBtn.Activated:Connect(function()
+		for _, c in ipairs(logFrame:GetChildren()) do
+			if c:IsA("TextLabel") then c:Destroy() end
+		end
+		logFrame.CanvasSize = UDim2.new(0,0,0,0)
+	end)
+
+	toggleBtn.Activated:Connect(function()
 		KS_RSpy.Enabled = not KS_RSpy.Enabled
-		btnToggle.Text = KS_RSpy.Enabled and "Enabled" or "Disabled"
-		btnToggle.BackgroundColor3 = KS_RSpy.Enabled and Color3.fromRGB(45,90,45) or Color3.fromRGB(90,45,45)
+		toggleBtn.Text = KS_RSpy.Enabled and "Enabled" or "Disabled"
+		toggleBtn.BackgroundColor3 = KS_RSpy.Enabled and Color3.fromRGB(56,102,65) or Color3.fromRGB(90,60,60)
 	end)
 
-	btnClose.MouseButton1Click:Connect(function()
-		gui.Enabled = false
+	closeBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			gui.Enabled = false
+		end
 	end)
 
-	makeDraggable(top, main)
+	KUTIL.makeDraggable(top, main)
 	KS_RSpy.Gui = gui
 end
 
--- namecall hook (like Infinite Yield style behaviour)
-do
-	local hook = rawget(getfenv(), "hookmetamethod")
-	local getncm = rawget(getfenv(), "getnamecallmethod") or getnamecallmethod
+function KS_RSpy.Toggle()
+	createRSpy()
+	KS_RSpy.Gui.Enabled = not KS_RSpy.Gui.Enabled
+end
 
-	if hook and getncm then
+-- hooking
+do
+	if CAP.hookmetamethod and CAP.getnamecallmethod then
 		local old
-		old = hook(game, "__namecall", function(self, ...)
-			local method = getncm()
+		old = CAP.hookmetamethod(game, "__namecall", function(self, ...)
+			local method = CAP.getnamecallmethod()
 			if KS_RSpy.Enabled and (method == "FireServer" or method == "InvokeServer") then
 				if typeof(self) == "Instance" and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
 					local args = {...}
-					local ok, encoded = pcall(HttpService.JSONEncode, HttpService, args)
-					if ok and KS_RSpy.AddLog then
+					local encoded = KUTIL.prettyArgs(args)
+					if KS_RSpy.AddLog then
 						KS_RSpy.AddLog(("[%s] %s(%s)"):format(method, self:GetFullName(), encoded))
 					end
 				end
@@ -924,159 +945,202 @@ do
 			return old(self, ...)
 		end)
 	else
-		warn("[KoroneRemoteSpy] hookmetamethod / getnamecallmethod not available; RSpy requires an executor with those.")
+		warnLog("Executor does not support hookmetamethod / getnamecallmethod; Remote Spy will be UI-only.")
 	end
 end
 
-function KS_RSpy.Toggle()
-	createRSpyGui()
-	KS_RSpy.Gui.Enabled = not KS_RSpy.Gui.Enabled
-end
-
-_G.KS_RSpy = KS_RSpy
-
 -------------------------------
--- Main Korone Studio Hub (emoji UI)
+-- SCRIPT LIBRARY (verified URLs)
 -------------------------------
-local function createHub()
-	if CoreGui:FindFirstChild("KoroneStudioHub") then
-		return CoreGui.KoroneStudioHub
+-- ⭐ Put YOUR trusted scripts/URLs here.
+--   Example entry:
+--   { name="Example Script", desc="My cool util", url="https://example.com/myscript.lua", tags={"util"} }
+local SCRIPT_LIBRARY = {
+	-- Fill with your own entries.
+}
+
+local function createLibrary()
+	if KS_Library.Gui then return end
+
+	local gui = newScreenGui("KoroneLibraryV2")
+	local main = roundedFrame(gui, UDim2.new(0,520,0,380), UDim2.new(0.5,-260,0.5,-190), Color3.fromRGB(16,16,20))
+	local top  = roundedFrame(main, UDim2.new(1,0,0,32), UDim2.new(0,0,0,0), Color3.fromRGB(26,26,32), UDim.new(0,10))
+	local title = label(top, "📚 Korone Script Library", UDim2.new(1,-200,1,0), UDim2.new(0,10,0,0), 18, true)
+
+	local searchBox = textBox(top, UDim2.new(0,220,0,24), UDim2.new(0,8,0.5,-12), "Search scripts...", false)
+	local closeBtn = textBox(top, UDim2.new(0,26,0,24), UDim2.new(1,-34,0.5,-12), "", false)
+	closeBtn.Text = "X"
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 16
+	closeBtn.TextXAlignment = Enum.TextXAlignment.Center
+	closeBtn.TextEditable = false
+
+	if not CAP.canFS then
+		warnLog("Filesystem not supported; script library will only allow copy, not saving files.")
 	end
 
-	local gui = Instance.new("ScreenGui")
-	gui.Name = "KoroneStudioHub"
-	gui.ResetOnSpawn = false
-	gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-	gui.Parent = CoreGui
-
-	local main = Instance.new("Frame")
-	main.AnchorPoint = Vector2.new(0,0.5)
-	main.Position = UDim2.new(0,16,0.5,0)
-	main.Size = UDim2.new(0,260,0,190)
-	main.BackgroundColor3 = Color3.fromRGB(18,18,20)
-	main.BorderSizePixel = 0
-	main.Parent = gui
-	local mc = Instance.new("UICorner"); mc.CornerRadius = UDim.new(0,12); mc.Parent = main
-
-	local top = Instance.new("Frame")
-	top.Size = UDim2.new(1,0,0,32)
-	top.BackgroundColor3 = Color3.fromRGB(26,26,30)
-	top.BorderSizePixel = 0
-	top.Parent = main
-	local tc = Instance.new("UICorner"); tc.CornerRadius = UDim.new(0,12); tc.Parent = top
-
-	local title = Instance.new("TextLabel")
-	title.BackgroundTransparency = 1
-	title.Size = UDim2.new(1,-64,1,0)
-	title.Position = UDim2.new(0,12,0,0)
-	title.Font = Enum.Font.SourceSansSemibold
-	title.TextSize = 18
-	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.TextColor3 = Color3.new(1,1,1)
-	title.Text = "🌙 Korone Studio Tools"
-	title.Parent = top
-
-	local btnMin = Instance.new("TextButton")
-	btnMin.Size = UDim2.new(0,24,0,24)
-	btnMin.Position = UDim2.new(1,-60,0.5,-12)
-	btnMin.BackgroundColor3 = Color3.fromRGB(40,40,50)
-	btnMin.BorderSizePixel = 0
-	btnMin.Font = Enum.Font.SourceSansBold
-	btnMin.Text = "-"
-	btnMin.TextSize = 18
-	btnMin.TextColor3 = Color3.new(1,1,1)
-	btnMin.Parent = top
-	local bmc = Instance.new("UICorner"); bmc.CornerRadius = UDim.new(0,6); bmc.Parent = btnMin
-
-	local btnClose = Instance.new("TextButton")
-	btnClose.Size = UDim2.new(0,24,0,24)
-	btnClose.Position = UDim2.new(1,-30,0.5,-12)
-	btnClose.BackgroundColor3 = Color3.fromRGB(70,35,35)
-	btnClose.BorderSizePixel = 0
-	btnClose.Font = Enum.Font.SourceSansBold
-	btnClose.Text = "X"
-	btnClose.TextSize = 16
-	btnClose.TextColor3 = Color3.new(1,1,1)
-	btnClose.Parent = top
-	local bcc = Instance.new("UICorner"); bcc.CornerRadius = UDim.new(0,6); bcc.Parent = btnClose
-
-	local content = Instance.new("Frame")
-	content.Position = UDim2.new(0,0,0,32)
-	content.Size = UDim2.new(1,0,1,-32)
-	content.BackgroundTransparency = 1
-	content.Parent = main
+	local list = Instance.new("ScrollingFrame")
+	list.Parent = main
+	list.Name = "List"
+	list.BackgroundColor3 = Color3.fromRGB(10,10,16)
+	list.BorderSizePixel = 0
+	list.Position = UDim2.new(0,6,0,38)
+	list.Size = UDim2.new(1,-12,1,-44)
+	list.CanvasSize = UDim2.new(0,0,0,0)
+	list.ScrollBarThickness = 6
+	local lC = Instance.new("UICorner"); lC.CornerRadius = UDim.new(0,8); lC.Parent = list
 
 	local layout = Instance.new("UIListLayout")
-	layout.Padding = UDim2.new(0,6)
-	layout.FillDirection = Enum.FillDirection.Vertical
-	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
-	layout.VerticalAlignment = Enum.VerticalAlignment.Top
+	layout.Parent = list
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
-	layout.Parent = content
+	layout.Padding = UDim.new(0,4)
 
-	local padding = Instance.new("UIPadding")
-	padding.PaddingTop = UDim2.new(0,10)
-	padding.PaddingBottom = UDim2.new(0,10)
-	padding.PaddingLeft = UDim2.new(0,10)
-	padding.PaddingRight = UDim2.new(0,10)
-	padding.Parent = content
+	local cards = {}
 
-	local function makeButton(text, sub, color)
-		local btn = Instance.new("TextButton")
-		btn.Size = UDim2.new(1,0,0,40)
-		btn.BackgroundColor3 = color
-		btn.BorderSizePixel = 0
-		btn.AutoButtonColor = true
-		btn.Text = ""
-		btn.Parent = content
-		local bc = Instance.new("UICorner"); bc.CornerRadius = UDim2.new(0,8); bc.Parent = btn
+	local function render()
+		for _, c in ipairs(list:GetChildren()) do
+			if c:IsA("Frame") then c:Destroy() end
+		end
+		cards = {}
 
-		local l1 = Instance.new("TextLabel")
-		l1.BackgroundTransparency = 1
-		l1.Size = UDim2.new(1,-8,0,22)
-		l1.Position = UDim2.new(0,8,0,2)
-		l1.Font = Enum.Font.SourceSansSemibold
-		l1.TextSize = 17
-		l1.TextXAlignment = Enum.TextXAlignment.Left
-		l1.TextColor3 = Color3.new(1,1,1)
-		l1.Text = text
-		l1.Parent = btn
+		local q = (searchBox.Text or ""):lower()
 
-		local l2 = Instance.new("TextLabel")
-		l2.BackgroundTransparency = 1
-		l2.Size = UDim2.new(1,-8,0,16)
-		l2.Position = UDim2.new(0,8,0,22)
-		l2.Font = Enum.Font.SourceSans
-		l2.TextSize = 13
-		l2.TextXAlignment = Enum.TextXAlignment.Left
-		l2.TextColor3 = Color3.fromRGB(230,230,230)
-		l2.TextTransparency = 0.1
-		l2.Text = sub
-		l2.Parent = btn
+		for _, entry in ipairs(SCRIPT_LIBRARY) do
+			if q == "" or string.find(entry.name:lower(), q, 1, true)
+				or (entry.desc and string.find(entry.desc:lower(), q, 1, true)) then
 
-		return btn
+				local card = roundedFrame(list, UDim2.new(1,-10,0,80), UDim2.new(0,0,0,0), Color3.fromRGB(22,22,30), UDim.new(0,8))
+				local nameL = label(card, entry.name, UDim2.new(1,-12,0,22), UDim2.new(0,6,0,4), 16, true)
+				local descL = label(card, entry.desc or "", UDim2.new(1,-12,0,32), UDim2.new(0,6,0,26), 13, false)
+				descL.TextColor3 = Color3.fromRGB(220,220,230)
+				descL.TextWrapped = true
+
+				local dlBtn = button(card, UDim2.new(0,120,0,26), UDim2.new(0,6,0,50),
+					CAP.canFS and "Download to file" or "Fetch to console", "", Color3.fromRGB(56,102,65))
+
+				dlBtn.Activated:Connect(function()
+					if not entry.url then return end
+					local src = KUTIL.fetch(entry.url)
+					if not src then
+						warnLog("Failed to fetch script from "..entry.url)
+						return
+					end
+
+					if CAP.canFS then
+						local folder = "KoroneStudioLibrary"
+						KUTIL.ensureFolders(folder)
+						local safeName = entry.name:gsub("[^%w_]+","_")
+						local path = folder.."/"..safeName..".lua"
+						if KUTIL.writeFile(path, src) then
+							log("Saved "..entry.name.." to "..path)
+						end
+					else
+						print("=== Script from "..entry.url.." ===")
+						print(src)
+					end
+				end)
+
+				table.insert(cards, card)
+			end
+		end
+
+		list.CanvasSize = UDim2.new(0,0,0,layout.AbsoluteContentSize.Y+8)
 	end
 
-	local explorerBtn = makeButton("🗂 Explorer", "Browse instances and open scripts", Color3.fromRGB(56,102,65))
-	local rspyBtn     = makeButton("📡 Remote Spy", "Log FireServer / InvokeServer", Color3.fromRGB(70,64,120))
-	local editorBtn   = makeButton("✏️ Editor", "Edit LocalPlayer or any instance", Color3.fromRGB(59,89,152))
+	searchBox:GetPropertyChangedSignal("Text"):Connect(render)
 
-	explorerBtn.MouseButton1Click:Connect(function() KS_Explorer.Toggle() end)
-	rspyBtn.MouseButton1Click:Connect(function() KS_RSpy.Toggle() end)
-	editorBtn.MouseButton1Click:Connect(function() KS_Editor.Open(LocalPlayer) end)
-
-	btnMin.MouseButton1Click:Connect(function()
-		main.Visible = not main.Visible
-	end)
-	btnClose.MouseButton1Click:Connect(function()
-		gui.Enabled = false
+	closeBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			gui.Enabled = false
+		end
 	end)
 
-	makeDraggable(top, main)
-	return gui
+	render()
+	KS_Library.Gui = gui
 end
 
-local hub = createHub()
-_G.KoroneStudioHub = hub
+function KS_Library.Toggle()
+	createLibrary()
+	KS_Library.Gui.Enabled = not KS_Library.Gui.Enabled
+end
 
-print("[KoroneStudio] Loaded. Use the 🌙 Korone Studio Tools panel on the left.")
+-------------------------------
+-- MAIN HUB UI
+-------------------------------
+local function createHub()
+	if KS_Hub.Gui then return end
+
+	local gui = newScreenGui("KoroneStudioHubV2")
+	local main = roundedFrame(gui, UDim2.new(0,280,0,220), UDim2.new(0,16,0.5,-110), Color3.fromRGB(18,18,22))
+	local top  = roundedFrame(main, UDim2.new(1,0,0,34), UDim2.new(0,0,0,0), Color3.fromRGB(26,26,32), UDim.new(0,12))
+	local title = label(top, "🌙 Korone Studio Tools 2026", UDim2.new(1,-90,1,0), UDim2.new(0,12,0,0), 18, true)
+
+	local minimizeBtn = textBox(top, UDim2.new(0,26,0,24), UDim2.new(1,-62,0.5,-12), "", false)
+	minimizeBtn.Text = "-"
+	minimizeBtn.Font = Enum.Font.GothamBold
+	minimizeBtn.TextSize = 20
+	minimizeBtn.TextXAlignment = Enum.TextXAlignment.Center
+	minimizeBtn.TextEditable = false
+
+	local closeBtn = textBox(top, UDim2.new(0,26,0,24), UDim2.new(1,-32,0.5,-12), "", false)
+	closeBtn.Text = "X"
+	closeBtn.Font = Enum.Font.GothamBold
+	closeBtn.TextSize = 16
+	closeBtn.TextXAlignment = Enum.TextXAlignment.Center
+	closeBtn.TextEditable = false
+
+	local content = Instance.new("Frame")
+	content.Parent = main
+	content.BackgroundTransparency = 1
+	content.Size = UDim2.new(1,0,1,-34)
+	content.Position = UDim2.new(0,0,0,34)
+
+	local layout = Instance.new("UIListLayout")
+	layout.Parent = content
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0,6)
+	layout.HorizontalAlignment = Enum.HorizontalAlignment.Center
+	layout.VerticalAlignment = Enum.VerticalAlignment.Top
+
+	local pad = Instance.new("UIPadding")
+	pad.Parent = content
+	pad.PaddingTop = UDim.new(0,10)
+	pad.PaddingLeft = UDim.new(0,10)
+	pad.PaddingRight = UDim.new(0,10)
+
+	local explorerBtn = button(content, UDim2.new(1,0,0,42), UDim2.new(0,0,0,0),
+		"🗂 Explorer", "Dex-style tree with live edit", Color3.fromRGB(56,102,65))
+	local rspyBtn = button(content, UDim2.new(1,0,0,42), UDim2.new(0,0,0,0),
+		"📡 Remote Spy 2.0", "Filter, pause, inspect args", Color3.fromRGB(70,64,120))
+	local editorBtn = button(content, UDim2.new(1,0,0,42), UDim2.new(0,0,0,0),
+		"✏️ Quick Editor", "Open editor on LocalPlayer", Color3.fromRGB(59,89,152))
+	local libBtn = button(content, UDim2.new(1,0,0,42), UDim2.new(0,0,0,0),
+		"📚 Script Library", "Download scripts from verified URLs", Color3.fromRGB(120,84,140))
+
+	explorerBtn.Activated:Connect(function() KS_Explorer.Toggle() end)
+	rspyBtn.Activated:Connect(function() KS_RSpy.Toggle() end)
+	editorBtn.Activated:Connect(function() KS_Editor.Open(LocalPlayer) end)
+	libBtn.Activated:Connect(function() KS_Library.Toggle() end)
+
+	minimizeBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			content.Visible = not content.Visible
+			main.Size = content.Visible and UDim2.new(0,280,0,220) or UDim2.new(0,280,0,40)
+		end
+	end)
+
+	closeBtn.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1
+		or input.UserInputType == Enum.UserInputType.Touch then
+			gui.Enabled = false
+		end
+	end)
+
+	KUTIL.makeDraggable(top, main)
+	KS_Hub.Gui = gui
+end
+
+createHub()
+log("Loaded Korone Studio Tools 2026 – open the 🌙 panel on the left!")
