@@ -2227,19 +2227,30 @@ local exported = {InitDeps = initDeps, InitAfterMain = initAfterMain, Main = mai
 _G.KS_Explorer = _G.KS_Explorer or exported
 
 function exported.Toggle()
-	-- Called by Korone Studio hub button
-	if Explorer and Explorer.Window then
-		local win = Explorer.Window
-		local isClosed = (win.Closed == nil and not win.Visible) or win.Closed
-		if isClosed then
-			win:Show({Align = "right", Pos = 1, Size = 0.5})
-		else
-			win:Close()
-		end
-	else
-		warn("[KoroneStudio] Explorer not initialised yet")
-	end
+    -- Lazily initialise Explorer on first toggle
+    if (not Explorer or not Explorer.Window) then
+        if exported.Main then
+            local ok, err = pcall(exported.Main)
+            if not ok then
+                warn("[KoroneStudio] Explorer main() failed: " .. tostring(err))
+                return
+            end
+        end
+    end
+
+    if Explorer and Explorer.Window then
+        local win = Explorer.Window
+        local isClosed = (win.Closed == nil and not win.Visible) or win.Closed
+        if isClosed then
+            win:Show({Align = "right", Pos = 1, Size = 0.5})
+        else
+            win:Close()
+        end
+    else
+        warn("[KoroneStudio] Explorer still not ready after main()")
+    end
 end
+
 
 -- Preserve original Dex export style
 if gethsfuncs then
