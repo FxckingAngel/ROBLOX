@@ -86,7 +86,7 @@ local function makeButton(emoji, tooltip, order, callback)
 end
 
 makeButton("🗂", "Explorer", 1, function()
-	if KS_Explorer and Explorer.Toggle then
+	if KS_Explorer and KS_Explorer.Toggle then
 		KS_Explorer.Toggle()
 	end
 end)
