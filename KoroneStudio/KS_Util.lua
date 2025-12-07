@@ -1,14 +1,25 @@
-local HttpService = game:GetService("HttpService")
+local Players          = game:GetService("Players")
+local RunService       = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local CoreGui          = game:GetService("CoreGui")
+local HttpService      = game:GetService("HttpService")
+
+-- Shared table that other modules use
+_G.KS_Shared = {
+    Players          = Players,
+    RunService       = RunService,
+    UserInputService = UserInputService,
+    CoreGui          = CoreGui,
+    HttpService      = HttpService,
+}
 
 local KS_UTIL = {}
 
--- =========================
--- Executor capability checks
--- =========================
+-- ========= Executor capability checks =========
 KS_UTIL.hasFS =
     typeof(writefile) == "function" and
-    typeof(readfile) == "function" and
-    typeof(isfolder) == "function" and
+    typeof(readfile)  == "function" and
+    typeof(isfolder)  == "function" and
     typeof(makefolder) == "function"
 
 KS_UTIL.hasDecompile =
@@ -18,36 +29,30 @@ KS_UTIL.hasDecompile =
 KS_UTIL.hasSaveInstance =
     typeof(saveinstance) == "function"
 
--- =========================
--- Safe folder creation
--- =========================
+-- ========= filesystem helpers =========
 function KS_UTIL.ensureFolders(path)
     if not KS_UTIL.hasFS then return end
     local cur = ""
     for seg in string.gmatch(path, "[^/]+") do
         cur = (cur == "") and seg or (cur .. "/" .. seg)
         if not isfolder(cur) then
-            makefolder(cur)
+            pcall(makefolder, cur)
         end
     end
 end
 
--- =========================
--- Safe file write
--- =========================
 function KS_UTIL.writeFile(path, contents)
     if not KS_UTIL.hasFS then return end
     pcall(writefile, path, contents)
 end
 
--- =========================
--- SAFE decompiler
--- =========================
+-- ========= decompiler helpers =========
 function KS_UTIL.getScriptSource(inst)
     if not inst or not inst:IsA("LuaSourceContainer") then
         return "-- invalid script"
     end
 
+    -- prefer built-in decompile
     if typeof(decompile) == "function" then
         local ok, res = pcall(decompile, inst)
         if ok and type(res) == "string" then
@@ -55,26 +60,25 @@ function KS_UTIL.getScriptSource(inst)
         end
     end
 
+    -- some executors expose bytecode only
     if typeof(getscriptbytecode) == "function" then
-        local ok, res = pcall(getscriptbytecode, inst)
+        local ok, _ = pcall(getscriptbytecode, inst)
         if ok then
-            return "-- bytecode dump (no decompiler supported)"
+            return "-- executor only exposes bytecode; no source available"
         end
     end
 
-    local ok, src = pcall(function()
+    -- fall back to Source
+    local okSrc, src = pcall(function()
         return inst.Source
     end)
-    if ok then
+    if okSrc and type(src) == "string" then
         return src
     end
 
-    return "-- decompiler not supported in this executor"
+    return "-- decompiler not supported on this executor"
 end
 
--- =========================
--- Safe apply script
--- =========================
 function KS_UTIL.applyScriptSource(inst, src)
     if inst and inst:IsA("LuaSourceContainer") then
         pcall(function()
@@ -83,9 +87,6 @@ function KS_UTIL.applyScriptSource(inst, src)
     end
 end
 
--- =========================
--- Safe export script
--- =========================
 function KS_UTIL.exportScript(inst)
     if not KS_UTIL.hasFS then return end
     if not inst or not inst:IsA("LuaSourceContainer") then return end
@@ -100,28 +101,28 @@ function KS_UTIL.exportScript(inst)
     KS_UTIL.writeFile(path, src)
 end
 
--- =========================
--- Safe SaveInstance
--- =========================
+-- ========= SaveInstance helper =========
 function KS_UTIL.saveGame()
     if KS_UTIL.hasSaveInstance then
         pcall(function()
             saveinstance()
         end)
+    else
+        warn("[KoroneStudio] saveinstance() not supported on this executor.")
     end
 end
 
--- =========================
--- Safe Instance Decomposer
--- =========================
+-- ========= simple decomposer / exporter =========
 local function decompose(inst, depth)
     depth = depth or 0
-    if depth > 5 then return { Name = inst.Name } end
+    if depth > 5 then
+        return { Name = inst.Name, ClassName = inst.ClassName }
+    end
 
     local t = {
-        Name = inst.Name,
+        Name      = inst.Name,
         ClassName = inst.ClassName,
-        Children = {}
+        Children  = {}
     }
 
     for _, child in ipairs(inst:GetChildren()) do
