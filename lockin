@@ -13353,3 +13353,739 @@ function IY_UTIL.decompose(root, maxDepth)
 	return tree
 end
 
+
+
+--// =====================================================
+--// IY_UTIL+EDITOR OVERHAUL (Korone Custom Build)
+--// =====================================================
+
+IY_UTIL = IY_UTIL or {}
+local HttpService = game:GetService("HttpService")
+
+---------------------------------------------------------------------
+--  FILESYSTEM HELPERS (CLIENT SIDE)
+---------------------------------------------------------------------
+
+function IY_UTIL.canFS()
+	return typeof(writefile) == "function"
+		and typeof(readfile) == "function"
+end
+
+function IY_UTIL.readFile(path)
+	if not IY_UTIL.canFS() then
+		error("[IY_UTIL] File system not supported in this executor.")
+	end
+
+	local ok, data = pcall(readfile, path)
+	if not ok then
+		error("[IY_UTIL] Failed to read file '" .. tostring(path) .. "': " .. tostring(data))
+	end
+	return data
+end
+
+function IY_UTIL.writeFile(path, contents)
+	if not IY_UTIL.canFS() then
+		error("[IY_UTIL] File system not supported in this executor.")
+	end
+
+	local ok, err = pcall(writefile, path, contents)
+	if not ok then
+		error("[IY_UTIL] Failed to write file '" .. tostring(path) .. "': " .. tostring(err))
+	end
+end
+
+function IY_UTIL.appendFile(path, contents)
+	if not IY_UTIL.canFS() then
+		error("[IY_UTIL] File system not supported in this executor.")
+	end
+
+	local existing = ""
+	if typeof(isfile) == "function" and isfile(path) then
+		local ok, data = pcall(readfile, path)
+		if ok and typeof(data) == "string" then
+			existing = data
+		end
+	end
+
+	IY_UTIL.writeFile(path, existing .. contents)
+end
+
+---------------------------------------------------------------------
+--  INSTANCE DECOMPOSER + EXPORTER
+---------------------------------------------------------------------
+
+local function _decomposeInstance(inst, depth, maxDepth)
+	depth = depth or 0
+	maxDepth = maxDepth or 4
+
+	if depth > maxDepth then
+		return {
+			__truncated = true,
+			Name = inst.Name,
+			ClassName = inst.ClassName,
+		}
+	end
+
+	local info = {
+		Name = inst.Name,
+		ClassName = inst.ClassName,
+		Properties = {},
+		Children = {},
+	}
+
+	local function safeProp(prop)
+		local ok, value = pcall(function()
+			return inst[prop]
+		end)
+		if ok then
+			info.Properties[prop] = value
+		end
+	end
+
+	for _, prop in ipairs({
+		"Archivable",
+		"ClassName",
+		"Name",
+		"Size",
+		"Position",
+		"Anchored",
+		"CanCollide",
+		"Transparency",
+		"BrickColor",
+		"Color",
+		"Text",
+		"TextColor3",
+		"BackgroundColor3",
+		"BackgroundTransparency",
+		"TextStrokeColor3",
+		"TextTransparency",
+		"Value"
+	}) do
+		safeProp(prop)
+	end
+
+	for _, child in ipairs(inst:GetChildren()) do
+		table.insert(info.Children, _decomposeInstance(child, depth + 1, maxDepth))
+	end
+
+	return info
+end
+
+function IY_UTIL.decompose(root, maxDepth)
+	maxDepth = maxDepth or 4
+
+	if typeof(root) == "string" then
+		local current = game
+		for token in string.gmatch(root, "[^%.]+") do
+			local child = current:FindFirstChild(token)
+			if not child then
+				error("[IY_UTIL] Cannot resolve path segment '" .. token .. "' from " .. current:GetFullName())
+			end
+			current = child
+		end
+		root = current
+	end
+
+	if typeof(root) ~= "Instance" then
+		error("[IY_UTIL] decompose expects an Instance or path string, got " .. typeof(root))
+	end
+
+	local tree = _decomposeInstance(root, 0, maxDepth)
+	print("[IY_UTIL] Decomposed:", root:GetFullName(), "(maxDepth =", maxDepth .. ")")
+	print(HttpService:JSONEncode(tree))
+	return tree
+end
+
+function IY_UTIL.exportInstance(root, opts)
+	opts = opts or {}
+	local maxDepth = opts.maxDepth or 6
+	local folder = opts.folder or ("IY_Exports/" .. game.PlaceId)
+	local name = opts.name
+
+	if typeof(root) == "Instance" and not name then
+		name = root.Name
+	end
+	if not name then
+		name = "Export"
+	end
+
+	if typeof(makefolder) == "function" and typeof(isfolder) == "function" then
+		if not isfolder("IY_Exports") then
+			makefolder("IY_Exports")
+		end
+		if not isfolder("IY_Exports/" .. game.PlaceId) then
+			makefolder("IY_Exports/" .. game.PlaceId)
+		end
+		if not isfolder(folder) then
+			makefolder(folder)
+		end
+	end
+
+	local tree = IY_UTIL.decompose(root, maxDepth)
+	local json = HttpService:JSONEncode(tree)
+	local filePath = folder .. "/" .. name .. ".json"
+
+	IY_UTIL.writeFile(filePath, json)
+	print("[IY_UTIL] Exported instance to:", filePath)
+	return filePath
+end
+
+---------------------------------------------------------------------
+--  SCRIPT DECOMPILER / EXPORT
+---------------------------------------------------------------------
+
+local function tryDecompile(inst)
+	if typeof(decompile) == "function" then
+		local ok, src = pcall(decompile, inst)
+		if ok and typeof(src) == "string" then
+			return src
+		end
+	end
+
+	if inst:IsA("LuaSourceContainer") then
+		local ok, src = pcall(function()
+			return inst.Source
+		end)
+		if ok and typeof(src) == "string" then
+			return src
+		end
+	end
+
+	return "-- failed to get source for " .. inst:GetFullName()
+end
+
+function IY_UTIL.getScriptSource(inst)
+	if not inst or not inst:IsA("LuaSourceContainer") then
+		error("[IY_UTIL] getScriptSource expects a Script/LocalScript/ModuleScript")
+	end
+	return tryDecompile(inst)
+end
+
+function IY_UTIL.applyScriptSource(inst, src)
+	if not inst or not inst:IsA("LuaSourceContainer") then
+		error("[IY_UTIL] applyScriptSource expects a Script/LocalScript/ModuleScript")
+	end
+	local ok, err = pcall(function()
+		inst.Source = src
+	end)
+	if not ok then
+		error("[IY_UTIL] Failed to apply script source: " .. tostring(err))
+	end
+end
+
+function IY_UTIL.exportScriptToFile(inst, baseFolder)
+	baseFolder = baseFolder or ("IY_Exports/" .. game.PlaceId .. "/Scripts")
+
+	if typeof(makefolder) == "function" and typeof(isfolder) == "function" then
+		if not isfolder("IY_Exports") then makefolder("IY_Exports") end
+		if not isfolder("IY_Exports/" .. game.PlaceId) then makefolder("IY_Exports/" .. game.PlaceId) end
+		if not isfolder(baseFolder) then makefolder(baseFolder) end
+	end
+
+	local src = IY_UTIL.getScriptSource(inst)
+	local safeName = inst.Name:gsub("[^%w_]+", "_")
+	local filePath = baseFolder .. "/" .. safeName .. "_" .. inst.ClassName .. ".lua"
+	IY_UTIL.writeFile(filePath, src)
+	print("[IY_UTIL] Exported script to:", filePath)
+	return filePath
+end
+
+---------------------------------------------------------------------
+--  MODERN SCRIPT + PROPERTY EDITOR UI
+---------------------------------------------------------------------
+
+local IY_Editor = {}
+IY_Editor.Gui = nil
+IY_Editor.CurrentInstance = nil
+
+local function makeDraggable(topBar, mainFrame)
+	local dragging = false
+	local dragStart, startPos
+
+	topBar.InputBegan:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = true
+			dragStart = input.Position
+			startPos = mainFrame.Position
+		end
+	end)
+
+	topBar.InputEnded:Connect(function(input)
+		if input.UserInputType == Enum.UserInputType.MouseButton1 then
+			dragging = false
+		end
+	end)
+
+	game:GetService("UserInputService").InputChanged:Connect(function(input)
+		if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+			local delta = input.Position - dragStart
+			mainFrame.Position = UDim2.new(
+				startPos.X.Scale,
+				startPos.X.Offset + delta.X,
+				startPos.Y.Scale,
+				startPos.Y.Offset + delta.Y
+			)
+		end
+	end)
+end
+
+local function createEditorGui()
+	if IY_Editor.Gui then return end
+
+	local parentGui = PARENT or game:GetService("CoreGui")
+
+	local rootGui = Instance.new("ScreenGui")
+	rootGui.Name = "IY_ModernEditor"
+	rootGui.ResetOnSpawn = false
+	rootGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+	rootGui.Parent = parentGui
+
+	local main = Instance.new("Frame")
+	main.Name = "Window"
+	main.AnchorPoint = Vector2.new(0.5, 0.5)
+	main.Position = UDim2.new(0.5, 0, 0.5, 0)
+	main.Size = UDim2.new(0, 720, 0, 420)
+	main.BackgroundColor3 = Color3.fromRGB(24, 24, 26)
+	main.BorderSizePixel = 0
+	main.ClipsDescendants = true
+	main.Parent = rootGui
+
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 10)
+	corner.Parent = main
+
+	local top = Instance.new("Frame")
+	top.Name = "TopBar"
+	top.Size = UDim2.new(1, 0, 0, 32)
+	top.BackgroundColor3 = Color3.fromRGB(30, 30, 34)
+	top.BorderSizePixel = 0
+	top.Parent = main
+
+	local topCorner = Instance.new("UICorner")
+	topCorner.CornerRadius = UDim.new(0, 10)
+	topCorner.Parent = top
+
+	local title = Instance.new("TextLabel")
+	title.Name = "Title"
+	title.BackgroundTransparency = 1
+	title.Size = UDim2.new(1, -160, 1, 0)
+	title.Position = UDim2.new(0, 12, 0, 0)
+	title.Font = Enum.Font.SourceSansSemibold
+	title.TextSize = 18
+	title.TextXAlignment = Enum.TextXAlignment.Left
+	title.TextColor3 = Color3.new(1, 1, 1)
+	title.Text = "IY Editor"
+	title.Parent = top
+
+	local close = Instance.new("TextButton")
+	close.Name = "Close"
+	close.Size = UDim2.new(0, 28, 0, 24)
+	close.Position = UDim2.new(1, -34, 0.5, -12)
+	close.BackgroundColor3 = Color3.fromRGB(60, 30, 30)
+	close.BorderSizePixel = 0
+	close.Font = Enum.Font.SourceSansBold
+	close.Text = "X"
+	close.TextSize = 16
+	close.TextColor3 = Color3.new(1, 1, 1)
+	close.Parent = top
+	local closeCorner = Instance.new("UICorner"); closeCorner.CornerRadius = UDim.new(0, 6); closeCorner.Parent = close
+
+	local save = Instance.new("TextButton")
+	save.Name = "Save"
+	save.Size = UDim2.new(0, 70, 0, 24)
+	save.Position = UDim2.new(1, -112, 0.5, -12)
+	save.BackgroundColor3 = Color3.fromRGB(45, 90, 45)
+	save.BorderSizePixel = 0
+	save.Font = Enum.Font.SourceSansSemibold
+	save.Text = "Save"
+	save.TextSize = 16
+	save.TextColor3 = Color3.new(1, 1, 1)
+	save.Parent = top
+	local saveCorner = Instance.new("UICorner"); saveCorner.CornerRadius = UDim.new(0, 6); saveCorner.Parent = save
+
+	local export = Instance.new("TextButton")
+	export.Name = "Export"
+	export.Size = UDim2.new(0, 70, 0, 24)
+	export.Position = UDim2.new(1, -190, 0.5, -12)
+	export.BackgroundColor3 = Color3.fromRGB(45, 60, 100)
+	export.BorderSizePixel = 0
+	export.Font = Enum.Font.SourceSansSemibold
+	export.Text = "Export"
+	export.TextSize = 16
+	export.TextColor3 = Color3.new(1, 1, 1)
+	export.Parent = top
+	local exportCorner = Instance.new("UICorner"); exportCorner.CornerRadius = UDim.new(0, 6); exportCorner.Parent = export
+
+	local content = Instance.new("Frame")
+	content.Name = "Content"
+	content.Position = UDim2.new(0, 0, 0, 32)
+	content.Size = UDim2.new(1, 0, 1, -32)
+	content.BackgroundTransparency = 1
+	content.Parent = main
+
+	local tabs = Instance.new("Frame")
+	tabs.Name = "Tabs"
+	tabs.Size = UDim2.new(0, 120, 1, 0)
+	tabs.BackgroundColor3 = Color3.fromRGB(30, 30, 34)
+	tabs.BorderSizePixel = 0
+	tabs.Parent = content
+
+	local tabsCorner = Instance.new("UICorner")
+	tabsCorner.CornerRadius = UDim.new(0, 10)
+	tabsCorner.Parent = tabs
+
+	local tabScript = Instance.new("TextButton")
+	tabScript.Name = "ScriptTab"
+	tabScript.Size = UDim2.new(1, 0, 0, 30)
+	tabScript.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+	tabScript.BorderSizePixel = 0
+	tabScript.Font = Enum.Font.SourceSansSemibold
+	tabScript.Text = "Script"
+	tabScript.TextSize = 16
+	tabScript.TextColor3 = Color3.new(1, 1, 1)
+	tabScript.Parent = tabs
+
+	local tabProps = Instance.new("TextButton")
+	tabProps.Name = "PropsTab"
+	tabProps.Size = UDim2.new(1, 0, 0, 30)
+	tabProps.Position = UDim2.new(0, 0, 0, 32)
+	tabProps.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+	tabProps.BorderSizePixel = 0
+	tabProps.Font = Enum.Font.SourceSansSemibold
+	tabProps.Text = "Properties"
+	tabProps.TextSize = 16
+	tabProps.TextColor3 = Color3.fromRGB(0.8, 0.8, 0.8)
+	tabProps.Parent = tabs
+
+	local right = Instance.new("Frame")
+	right.Name = "Right"
+	right.Position = UDim2.new(0, 124, 0, 0)
+	right.Size = UDim2.new(1, -124, 1, 0)
+	right.BackgroundColor3 = Color3.fromRGB(20, 20, 22)
+	right.BorderSizePixel = 0
+	right.Parent = content
+
+	-- SCRIPT EDITOR AREA
+	local scriptFrame = Instance.new("Frame")
+	scriptFrame.Name = "ScriptFrame"
+	scriptFrame.Size = UDim2.new(1, -12, 1, -40)
+	scriptFrame.Position = UDim2.new(0, 6, 0, 34)
+	scriptFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
+	scriptFrame.BorderSizePixel = 0
+	scriptFrame.Parent = right
+	local scriptCorner = Instance.new("UICorner"); scriptCorner.CornerRadius = UDim.new(0, 6); scriptCorner.Parent = scriptFrame
+
+	local scriptBox = Instance.new("TextBox")
+	scriptBox.Name = "CodeBox"
+	scriptBox.Size = UDim2.new(1, -8, 1, -8)
+	scriptBox.Position = UDim2.new(0, 4, 0, 4)
+	scriptBox.BackgroundTransparency = 1
+	scriptBox.ClearTextOnFocus = false
+	scriptBox.MultiLine = true
+	scriptBox.TextXAlignment = Enum.TextXAlignment.Left
+	scriptBox.TextYAlignment = Enum.TextYAlignment.Top
+	scriptBox.TextWrapped = false
+	scriptBox.TextColor3 = Color3.new(1, 1, 1)
+	scriptBox.Font = Enum.Font.Code
+	scriptBox.TextSize = 15
+	scriptBox.Text = ""
+	scriptBox.Parent = scriptFrame
+
+	local scriptScroll = Instance.new("ScrollingFrame")
+	scriptScroll.Name = "CodeScroll"
+	scriptScroll.Size = UDim2.new(1, 0, 1, 0)
+	scriptScroll.Position = scriptFrame.Position
+	scriptScroll.BackgroundTransparency = 1
+	scriptScroll.CanvasSize = UDim2.new(0, 0, 0, 0)
+	scriptScroll.ScrollBarThickness = 6
+	scriptScroll.BorderSizePixel = 0
+	scriptScroll.Parent = right
+	scriptFrame.Parent = scriptScroll
+	scriptBox:GetPropertyChangedSignal("TextBounds"):Connect(function()
+		scriptScroll.CanvasSize = UDim2.new(0, 0, 0, scriptBox.TextBounds.Y + 12)
+	end)
+
+	-- SEARCH BAR FOR SCRIPT
+	local searchBar = Instance.new("TextBox")
+	searchBar.Name = "SearchBox"
+	searchBar.Size = UDim2.new(0, 180, 0, 24)
+	searchBar.Position = UDim2.new(0, 6, 0, 6)
+	searchBar.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+	searchBar.BorderSizePixel = 0
+	searchBar.ClearTextOnFocus = false
+	searchBar.PlaceholderText = "Search in script..."
+	searchBar.Font = Enum.Font.SourceSans
+	searchBar.TextSize = 14
+	searchBar.TextColor3 = Color3.new(1, 1, 1)
+	searchBar.Parent = right
+	local searchCorner = Instance.new("UICorner"); searchCorner.CornerRadius = UDim.new(0, 6); searchCorner.Parent = searchBar
+
+	local searchBtn = Instance.new("TextButton")
+	searchBtn.Name = "SearchNext"
+	searchBtn.Size = UDim2.new(0, 60, 0, 24)
+	searchBtn.Position = UDim2.new(0, 194, 0, 6)
+	searchBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 60)
+	searchBtn.BorderSizePixel = 0
+	searchBtn.Font = Enum.Font.SourceSansSemibold
+	searchBtn.TextSize = 14
+	searchBtn.TextColor3 = Color3.new(1, 1, 1)
+	searchBtn.Text = "Next"
+	searchBtn.Parent = right
+	local searchBtnCorner = Instance.new("UICorner"); searchBtnCorner.CornerRadius = UDim.new(0, 6); searchBtnCorner.Parent = searchBtn
+
+	-- PROPERTY EDITOR
+	local propFrame = Instance.new("ScrollingFrame")
+	propFrame.Name = "PropFrame"
+	propFrame.Position = UDim2.new(0, 6, 0, 34)
+	propFrame.Size = UDim2.new(1, -12, 1, -40)
+	propFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 18)
+	propFrame.BorderSizePixel = 0
+	propFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	propFrame.ScrollBarThickness = 6
+	propFrame.Visible = false
+	propFrame.Parent = right
+	local propCorner = Instance.new("UICorner"); propCorner.CornerRadius = UDim.new(0, 6); propCorner.Parent = propFrame
+
+	local listLayout = Instance.new("UIListLayout")
+	listLayout.Padding = UDim.new(0, 4)
+	listLayout.FillDirection = Enum.FillDirection.Vertical
+	listLayout.HorizontalAlignment = Enum.HorizontalAlignment.Left
+	listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	listLayout.Parent = propFrame
+
+	local function addPropRow(name, value)
+		local row = Instance.new("Frame")
+		row.Name = name
+		row.Size = UDim2.new(1, -8, 0, 26)
+		row.BackgroundTransparency = 1
+		row.Parent = propFrame
+
+		local nameLabel = Instance.new("TextLabel")
+		nameLabel.BackgroundTransparency = 1
+		nameLabel.Size = UDim2.new(0.35, 0, 1, 0)
+		nameLabel.Font = Enum.Font.SourceSans
+		nameLabel.TextSize = 14
+		nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+		nameLabel.TextColor3 = Color3.new(1, 1, 1)
+		nameLabel.Text = name
+		nameLabel.Parent = row
+
+		local valueBox = Instance.new("TextBox")
+		valueBox.Size = UDim2.new(0.65, -4, 1, 0)
+		valueBox.Position = UDim2.new(0.35, 4, 0, 0)
+		valueBox.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+		valueBox.BorderSizePixel = 0
+		valueBox.ClearTextOnFocus = false
+		valueBox.Font = Enum.Font.Code
+		valueBox.TextSize = 14
+		valueBox.TextXAlignment = Enum.TextXAlignment.Left
+		valueBox.TextColor3 = Color3.new(1, 1, 1)
+		valueBox.Text = tostring(value)
+		valueBox.Parent = row
+		local vc = Instance.new("UICorner"); vc.CornerRadius = UDim.new(0, 4); vc.Parent = valueBox
+
+		return row, valueBox
+	end
+
+	local function refreshProps(inst)
+		for _, child in ipairs(propFrame:GetChildren()) do
+			if child:IsA("Frame") then
+				child:Destroy()
+			end
+		end
+
+		if not inst then return end
+
+		local propsToShow = {
+			"Name",
+			"ClassName",
+			"Archivable",
+			"Transparency",
+			"CanCollide",
+			"Anchored",
+			"Text",
+			"Value",
+		}
+
+		for _, propName in ipairs(propsToShow) do
+			local ok, value = pcall(function()
+				return inst[propName]
+			end)
+			if ok then
+				local _, valueBox = addPropRow(propName, value)
+				valueBox.FocusLost:Connect(function(enterPressed)
+					if enterPressed then
+						local text = valueBox.Text
+						local newValue = text
+
+						local originalType = typeof(value)
+						if originalType == "number" then
+							newValue = tonumber(text) or value
+						elseif originalType == "boolean" then
+							local lower = string.lower(text)
+							newValue = (lower == "true" or lower == "1" or lower == "yes")
+						end
+
+						local okSet, err = pcall(function()
+							inst[propName] = newValue
+						end)
+						if not okSet then
+							warn("[IY_Editor] Failed to set property", propName, ":", err)
+							valueBox.Text = tostring(value)
+						else
+							print("[IY_Editor] Set", inst:GetFullName(), propName, "to", tostring(newValue))
+						end
+					end
+				end)
+			end
+		end
+
+		propFrame.CanvasSize = UDim2.new(0, 0, 0, listLayout.AbsoluteContentSize.Y + 12)
+	end
+
+	-- TAB SWITCHING
+	local function selectTab(which)
+		if which == "script" then
+			scriptScroll.Visible = true
+			propFrame.Visible = false
+			tabScript.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+			tabProps.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+		else
+			scriptScroll.Visible = false
+			propFrame.Visible = true
+			tabScript.BackgroundColor3 = Color3.fromRGB(26, 26, 30)
+			tabProps.BackgroundColor3 = Color3.fromRGB(40, 40, 48)
+		end
+	end
+
+	tabScript.MouseButton1Click:Connect(function()
+		selectTab("script")
+	end)
+
+	tabProps.MouseButton1Click:Connect(function()
+		selectTab("props")
+	end)
+
+	-- SEARCH LOGIC
+	local lastSearchIndex = 1
+	local function doSearch()
+		local query = searchBar.Text
+		local text = scriptBox.Text
+		if query == "" or text == "" then return end
+
+		local startPos = string.find(string.lower(text), string.lower(query), lastSearchIndex, true)
+		if not startPos then
+			startPos = string.find(string.lower(text), string.lower(query), 1, true)
+		end
+		if startPos then
+			local lineBefore = string.sub(text, 1, startPos)
+			local _, lineCount = string.gsub(lineBefore, "\n", "")
+			scriptBox.CursorPosition = startPos + #query
+			scriptScroll.CanvasPosition = Vector2.new(0, (lineCount - 1) * 16)
+			lastSearchIndex = startPos + #query
+		end
+	end
+
+	searchBtn.MouseButton1Click:Connect(doSearch)
+	searchBar.FocusLost:Connect(function(enter)
+		if enter then
+			lastSearchIndex = 1
+			doSearch()
+		end
+	end)
+
+	-- BUTTON BEHAVIOR
+	close.MouseButton1Click:Connect(function()
+		rootGui.Enabled = false
+		IY_Editor.CurrentInstance = nil
+	end)
+
+	save.MouseButton1Click:Connect(function()
+		local inst = IY_Editor.CurrentInstance
+		if not inst then return end
+
+		if inst:IsA("LuaSourceContainer") then
+			local src = scriptBox.Text or ""
+			local ok, err = pcall(function()
+				IY_UTIL.applyScriptSource(inst, src)
+			end)
+			if not ok then
+				warn("[IY_Editor] Failed to apply script:", err)
+			else
+				pcall(function()
+					IY_UTIL.exportScriptToFile(inst)
+				end)
+				print("[IY_Editor] Saved + exported script:", inst:GetFullName())
+			end
+		else
+			refreshProps(inst)
+		end
+	end)
+
+	export.MouseButton1Click:Connect(function()
+		local inst = IY_Editor.CurrentInstance
+		if not inst then return end
+
+		local ok, result = pcall(function()
+			if inst:IsA("LuaSourceContainer") then
+				return IY_UTIL.exportScriptToFile(inst)
+			else
+				return IY_UTIL.exportInstance(inst, { name = inst.Name })
+			end
+		end)
+
+		if ok then
+			print("[IY_Editor] Exported to:", result)
+		else
+			warn("[IY_Editor] Export failed:", result)
+		end
+	end)
+
+	makeDraggable(top, main)
+
+	IY_Editor.Gui = rootGui
+	IY_Editor._widgets = {
+		Main = main,
+		Title = title,
+		CodeBox = scriptBox,
+		ScriptScroll = scriptScroll,
+		SearchBox = searchBar,
+		PropFrame = propFrame,
+		RefreshProps = refreshProps,
+		SelectTab = selectTab,
+	}
+end
+
+function IY_Editor.OpenForInstance(inst)
+	if not inst or typeof(inst) ~= "Instance" then
+		error("[IY_Editor] OpenForInstance expects an Instance")
+	end
+
+	createEditorGui()
+	IY_Editor.Gui.Enabled = true
+	IY_Editor.CurrentInstance = inst
+
+	local w = IY_Editor._widgets
+	w.Title.Text = string.format("IY Editor — %s (%s)", inst.Name, inst.ClassName)
+
+	if inst:IsA("LuaSourceContainer") then
+		local src = IY_UTIL.getScriptSource(inst)
+		w.CodeBox.Text = src
+		w.SelectTab("script")
+	else
+		w.CodeBox.Text = "-- Not a script. Use the Properties tab to edit common fields."
+		w.SelectTab("props")
+	end
+
+	w.RefreshProps(inst)
+end
+
+_G.IY_Editor = IY_Editor
+_G.IY_UTIL = IY_UTIL
+
+-- Usage examples:
+--   IY_Editor.OpenForInstance(workspace.SomeScript)
+--   IY_Editor.OpenForInstance(game.Players.LocalPlayer)
+--   IY_UTIL.exportInstance(workspace, {name = "WorkspaceTree"})
+--   IY_UTIL.exportScriptToFile(workspace.Script)
+-- Hook this into Explorer selection for full integration.
