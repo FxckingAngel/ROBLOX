@@ -1,0 +1,8 @@
+{
+  "path": "Workspace.TestModel",
+  "name": "TestModel",
+  "root": {
+    "className": "Model",
+    "children": []
+  }
+}
