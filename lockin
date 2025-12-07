@@ -10,7 +10,7 @@ end
 
 -- Safely mark as loaded in the shared environment
 pcall(function()
-	(local getgenv_fn) = getgenv or function() return _G end
+	local getgenv_fn = getgenv or function() return _G end
 	local env = getgenv_fn()
 	env.IY_LOADED = true
 end)
@@ -22,15 +22,22 @@ end
 
 -- Safer compatibility helper: resolves exploit APIs with type checks
 local function resolve(expectedType, value, fallback)
-	if typeof(value) == expectedType then
+	local ok = pcall(function()
+		return typeof(value)
+	end)
+
+	if ok and typeof(value) == expectedType then
 		return value
 	end
 	return fallback
 end
 
--- Backwards‑compat shim: keep old name so existing code still works
+-- Backwards-compat shim: keep old name so existing code still works
 function missing(t, f, fallback)
-	return resolve(t, f, fallback)
+	if type(f) == t then
+		return f
+	end
+	return fallback
 end
 
 cloneref = missing("function", cloneref, function(...) return ... end)
@@ -13250,7 +13257,7 @@ function IY_UTIL.writeFile(path, contents)
 	end
 end
 
--- Quick in‑console edit helper (no GUI, but structured)
+-- Quick in-console edit helper (no GUI, but structured)
 function IY_UTIL.editFile(path, transformFn)
 	local old = IY_UTIL.readFile(path)
 	local newContents = old
